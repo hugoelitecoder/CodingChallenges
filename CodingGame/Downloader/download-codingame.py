@@ -14,7 +14,7 @@ EXTENSIONS = {
 }
 
 # Always use relative to script location
-BASE_FOLDER = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "CodinGameSolutions"))
+BASE_FOLDER = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Solutions"))
 
 def clean_name(name):
     """Remove invalid chars, replace spaces with _, start with uppercase."""

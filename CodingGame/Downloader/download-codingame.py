@@ -17,11 +17,8 @@ EXTENSIONS = {
 BASE_FOLDER = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Solutions"))
 
 def clean_name(name):
-    """Remove invalid chars, replace spaces with _, start with uppercase."""
     # Remove invalid filename characters
     name = re.sub(r'[\\/*?:"<>|]', "", name)
-    # Replace whitespace with underscores
-    name = re.sub(r'\s+', '_', name)
     # Remove C_ or c_ prefix
     name = re.sub(r'^[Cc]_', '', name)
     # Always start with uppercase
@@ -111,7 +108,7 @@ def main():
 
             for lang, sol in by_lang.items():
                 extension = EXTENSIONS.get(lang, 'txt')
-                # Remove redundant lang from filename (e.g., 'Csharp.Roman_Sorting.cs' => 'Roman_Sorting.cs')
+                # Remove redundant lang from filename 
                 filename = f"{cleaned_title}.{extension}"
                 filepath = os.path.join(folder, filename)
                 solution = client.request("Solution", "findSolution", [user_id, sol["testSessionQuestionSubmissionId"]])

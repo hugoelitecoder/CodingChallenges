@@ -109,7 +109,11 @@ def get_user_info(session_cookie):
         return username, 0
     
     submissions_by_difficulty = stats_data['data']['matchedUser']['submitStats']['acSubmissionNum']
-    total_unique_solved = sum(s['count'] for s in submissions_by_difficulty)
+    
+    # Find the 'All' category, which contains the correct total of unique solved problems.
+    all_stats = next((s for s in submissions_by_difficulty if s['difficulty'] == 'All'), None)
+    total_unique_solved = all_stats['count'] if all_stats else 0
+    
     return username, total_unique_solved
 
 def fetch_submission_detail(submission_id, session_cookie):
@@ -246,7 +250,7 @@ def main():
         has_next = submission_list['hasNext']
         last_key = submission_list['lastKey']
         offset += len(submissions)
-        print(f"\n... Fetched page, processed {offset} total submissions so far ...")
+        print(f"\n... Fetched page, processed {offset} total submissions from history ...")
 
     print(f"\n🎉 All done! Processed all available submission history.")
     print(f"   - Saved:   {saved_count} new unique solution(s).")

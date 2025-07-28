@@ -5,7 +5,6 @@ using System.Diagnostics;
 
 class Program
 {
-
     static void Main()
     {
         var baseCells = new Dictionary<char, List<(int r, int c)>>();
@@ -100,7 +99,7 @@ class Program
 
                             cols.Add(pieceToCol[id]);
                             var payload = new Placement(id, o, br, bc);
-                            solver.AddRow(cols, payload);
+                            solver.AddRow(cols.ToArray(), cols.Count, payload);
                         }
                 }
             }
@@ -125,10 +124,6 @@ class Program
             }
 
             Console.Error.WriteLine($"[DEBUG] Time elapsed: {stopwatch.Elapsed.TotalMilliseconds:0.00} ms");
-            Console.Error.WriteLine($"[DEBUG] Steps (nodes visited): {solver.Steps}");
-            Console.Error.WriteLine($"[DEBUG] Max depth reached: {solver.MaxDepth}");
-            Console.Error.WriteLine($"[DEBUG] Solutions found: {solver.SolutionsFound}");
-
             for (int r = 0; r < H; r++)
             {
                 for (int c = 0; c < W; c++)
@@ -137,12 +132,10 @@ class Program
             }
         }
     }
-
 }
 
 public static class Polyominoes
 {
-
     public static readonly string[] ShapeMap = {
         "IICBBJJJ",
         "ICCCBLLJ",
@@ -166,7 +159,6 @@ public static class Polyominoes
             _ => (r, c),
         };
     }
-
 }
 
 public class Placement
@@ -185,7 +177,7 @@ public class Placement
     }
 }
 
-public class AlgorithmXSolver<T> where T : class
+public class AlgorithmXSolver<T> where T : notnull
 {
     private struct DlxNode
     {
@@ -200,10 +192,6 @@ public class AlgorithmXSolver<T> where T : class
     private int _nodeCount;
     private readonly T[] _solution;
     private int _solutionDepth;
-
-    public int Steps { get; private set; }
-    public int MaxDepth { get; private set; }
-    public int SolutionsFound { get; private set; }
 
     public AlgorithmXSolver(int numPrimaryColumns, int numTotalColumns, int maxNodes, int maxSolutionDepth)
     {
@@ -229,14 +217,14 @@ public class AlgorithmXSolver<T> where T : class
         _nodeCount = numTotalColumns + 1;
     }
 
-    public void AddRow(List<int> columns, T rowPayload)
+    public void AddRow(int[] columns, int count, T rowPayload)
     {
-        if (columns.Count == 0) return;
+        if (count == 0) return;
 
         int firstNode = -1;
-        foreach (int c_idx in columns)
+        for (int ci = 0; ci < count; ci++)
         {
-            int colHeaderNodeIndex = c_idx + 1;
+            int colHeaderNodeIndex = columns[ci] + 1;
             int newNodeIndex = _nodeCount++;
 
             _nodes[colHeaderNodeIndex].Size++;
@@ -266,11 +254,6 @@ public class AlgorithmXSolver<T> where T : class
 
     public T[] Solve()
     {
-        Steps = 0;
-        MaxDepth = 0;
-        SolutionsFound = 0;
-        _solutionDepth = 0;
-
         return EnumerateSolutions().FirstOrDefault();
     }
 
@@ -280,30 +263,22 @@ public class AlgorithmXSolver<T> where T : class
         {
             var result = new T[_solutionDepth];
             Array.Copy(_solution, result, _solutionDepth);
-            SolutionsFound++;
             yield return result;
             yield break;
         }
-
         int c = ChooseColumn();
         Cover(c);
-
         for (int r_node = _nodes[c].Down; r_node != c; r_node = _nodes[r_node].Down)
         {
-            Steps++;
             _solution[_solutionDepth++] = _nodes[r_node].RowPayload;
-            if (_solutionDepth > MaxDepth) MaxDepth = _solutionDepth;
-
             for (int j_node = _nodes[r_node].Right; j_node != r_node; j_node = _nodes[j_node].Right)
             {
                 Cover(_nodes[j_node].ColHeader);
             }
-
             foreach (var sol in EnumerateSolutions())
             {
                 yield return sol;
             }
-
             _solutionDepth--;
             for (int j_node = _nodes[r_node].Left; j_node != r_node; j_node = _nodes[j_node].Left)
             {
@@ -332,7 +307,6 @@ public class AlgorithmXSolver<T> where T : class
     {
         _nodes[_nodes[c].Left].Right = _nodes[c].Right;
         _nodes[_nodes[c].Right].Left = _nodes[c].Left;
-
         for (int i = _nodes[c].Down; i != c; i = _nodes[i].Down)
         {
             for (int j = _nodes[i].Right; j != i; j = _nodes[j].Right)

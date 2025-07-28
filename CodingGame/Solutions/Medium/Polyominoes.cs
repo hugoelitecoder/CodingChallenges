@@ -1,48 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Diagnostics;
 
 class Program
 {
-    public class Placement
-    {
-        public char PieceId { get; }
-        public int OrientationIndex { get; }
-        public int BoardRow { get; }
-        public int BoardCol { get; }
-
-        public Placement(char pieceId, int orientationIndex, int boardRow, int boardCol)
-        {
-            PieceId = pieceId;
-            OrientationIndex = orientationIndex;
-            BoardRow = boardRow;
-            BoardCol = boardCol;
-        }
-    }
-
-    static readonly string[] shapeMap = {
-        "IICBBJJJ",
-        "ICCCBLLJ",
-        "IICBBLHJ",
-        "EIMMLLHH",
-        "EEEMMNNN",
-        "EGGDAANN",
-        "GGDDDAKK",
-        "GFFFFAKK"
-    };
-
-    static (int r, int c) Transform((int r, int c) p, bool flip, int rot)
-    {
-        int r = p.r, c = p.c;
-        if (flip) c = -c;
-        return rot switch
-        {
-            90 => (c, -r),
-            180 => (-r, -c),
-            270 => (-c, r),
-            _ => (r, c),
-        };
-    }
 
     static void Main()
     {
@@ -50,7 +12,7 @@ class Program
         for (int r = 0; r < 8; r++)
             for (int c = 0; c < 8; c++)
             {
-                char ch = shapeMap[r][c];
+                char ch = Polyominoes.ShapeMap[r][c];
                 if (ch == '.') continue;
                 if (!baseCells.ContainsKey(ch))
                     baseCells[ch] = new List<(int r, int c)>();
@@ -67,14 +29,14 @@ class Program
 
             var orients = new List<List<(int r, int c)>>();
             foreach (bool flip in new[] { false, true })
-            foreach (int rot in new[] { 0, 90, 180, 270 })
-            {
-                var pts = norm.Select(p => Transform(p, flip, rot)).ToList();
-                int r0 = pts.Min(p => p.r), c0 = pts.Min(p => p.c);
-                var finalPts = pts.Select(p => (r: p.r - r0, c: p.c - c0)).OrderBy(p => p.r).ThenBy(p => p.c).ToList();
-                if (!orients.Any(o2 => o2.SequenceEqual(finalPts)))
-                    orients.Add(finalPts);
-            }
+                foreach (int rot in new[] { 0, 90, 180, 270 })
+                {
+                    var pts = norm.Select(p => Polyominoes.Transform(p, flip, rot)).ToList();
+                    int r0 = pts.Min(p => p.r), c0 = pts.Min(p => p.c);
+                    var finalPts = pts.Select(p => (r: p.r - r0, c: p.c - c0)).OrderBy(p => p.r).ThenBy(p => p.c).ToList();
+                    if (!orients.Any(o2 => o2.SequenceEqual(finalPts)))
+                        orients.Add(finalPts);
+                }
             shapes[id] = orients;
         }
 
@@ -93,7 +55,7 @@ class Program
                 for (int c = 0; c < W; c++)
                     board[r, c] = row[c];
             }
-            
+
             var distinctPieceIds = pieceIds.Distinct().ToList();
 
             var oCells = new List<(int r, int c)>();
@@ -116,7 +78,6 @@ class Program
             int maxNodes = 400000;
 
             var solver = new AlgorithmXSolver<Placement>(totalCols, totalCols, maxNodes, maxSolutionDepth);
-
             foreach (var id in distinctPieceIds)
             {
                 var orientations = shapes[id];
@@ -125,26 +86,28 @@ class Program
                     var pts = orientations[o];
                     int maxr = pts.Max(p => p.r), maxc = pts.Max(p => p.c);
                     for (int br = 0; br + maxr < H; br++)
-                    for (int bc = 0; bc + maxc < W; bc++)
-                    {
-                        var cols = new List<int>();
-                        bool ok = true;
-                        foreach (var (dr, dc) in pts)
+                        for (int bc = 0; bc + maxc < W; bc++)
                         {
-                            int rr = br + dr, cc = bc + dc;
-                            if (board[rr, cc] != 'O') { ok = false; break; }
-                            cols.Add(cellToCol[(r: rr, c: cc)]);
-                        }
-                        if (!ok) continue;
+                            var cols = new List<int>();
+                            bool ok = true;
+                            foreach (var (dr, dc) in pts)
+                            {
+                                int rr = br + dr, cc = bc + dc;
+                                if (board[rr, cc] != 'O') { ok = false; break; }
+                                cols.Add(cellToCol[(r: rr, c: cc)]);
+                            }
+                            if (!ok) continue;
 
-                        cols.Add(pieceToCol[id]);
-                        var payload = new Placement(id, o, br, bc);
-                        solver.AddRow(cols, payload);
-                    }
+                            cols.Add(pieceToCol[id]);
+                            var payload = new Placement(id, o, br, bc);
+                            solver.AddRow(cols, payload);
+                        }
                 }
             }
 
+            var stopwatch = Stopwatch.StartNew();
             Placement[] solution = solver.Solve();
+            stopwatch.Stop();
 
             var outp = new char[H, W];
             for (int r = 0; r < H; r++)
@@ -161,6 +124,11 @@ class Program
                 }
             }
 
+            Console.Error.WriteLine($"[DEBUG] Time elapsed: {stopwatch.Elapsed.TotalMilliseconds:0.00} ms");
+            Console.Error.WriteLine($"[DEBUG] Steps (nodes visited): {solver.Steps}");
+            Console.Error.WriteLine($"[DEBUG] Max depth reached: {solver.MaxDepth}");
+            Console.Error.WriteLine($"[DEBUG] Solutions found: {solver.SolutionsFound}");
+
             for (int r = 0; r < H; r++)
             {
                 for (int c = 0; c < W; c++)
@@ -168,6 +136,52 @@ class Program
                 Console.WriteLine();
             }
         }
+    }
+
+}
+
+public static class Polyominoes
+{
+
+    public static readonly string[] ShapeMap = {
+        "IICBBJJJ",
+        "ICCCBLLJ",
+        "IICBBLHJ",
+        "EIMMLLHH",
+        "EEEMMNNN",
+        "EGGDAANN",
+        "GGDDDAKK",
+        "GFFFFAKK"
+    };
+
+    public static (int r, int c) Transform((int r, int c) p, bool flip, int rot)
+    {
+        int r = p.r, c = p.c;
+        if (flip) c = -c;
+        return rot switch
+        {
+            90 => (c, -r),
+            180 => (-r, -c),
+            270 => (-c, r),
+            _ => (r, c),
+        };
+    }
+
+}
+
+public class Placement
+{
+    public char PieceId { get; }
+    public int OrientationIndex { get; }
+    public int BoardRow { get; }
+    public int BoardCol { get; }
+
+    public Placement(char pieceId, int orientationIndex, int boardRow, int boardCol)
+    {
+        PieceId = pieceId;
+        OrientationIndex = orientationIndex;
+        BoardRow = boardRow;
+        BoardCol = boardCol;
     }
 }
 
@@ -186,6 +200,10 @@ public class AlgorithmXSolver<T> where T : class
     private int _nodeCount;
     private readonly T[] _solution;
     private int _solutionDepth;
+
+    public int Steps { get; private set; }
+    public int MaxDepth { get; private set; }
+    public int SolutionsFound { get; private set; }
 
     public AlgorithmXSolver(int numPrimaryColumns, int numTotalColumns, int maxNodes, int maxSolutionDepth)
     {
@@ -248,6 +266,11 @@ public class AlgorithmXSolver<T> where T : class
 
     public T[] Solve()
     {
+        Steps = 0;
+        MaxDepth = 0;
+        SolutionsFound = 0;
+        _solutionDepth = 0;
+
         return EnumerateSolutions().FirstOrDefault();
     }
 
@@ -257,6 +280,7 @@ public class AlgorithmXSolver<T> where T : class
         {
             var result = new T[_solutionDepth];
             Array.Copy(_solution, result, _solutionDepth);
+            SolutionsFound++;
             yield return result;
             yield break;
         }
@@ -266,7 +290,9 @@ public class AlgorithmXSolver<T> where T : class
 
         for (int r_node = _nodes[c].Down; r_node != c; r_node = _nodes[r_node].Down)
         {
+            Steps++;
             _solution[_solutionDepth++] = _nodes[r_node].RowPayload;
+            if (_solutionDepth > MaxDepth) MaxDepth = _solutionDepth;
 
             for (int j_node = _nodes[r_node].Right; j_node != r_node; j_node = _nodes[j_node].Right)
             {

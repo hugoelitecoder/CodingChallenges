@@ -19,9 +19,10 @@ class Player
         {'Y', new[]{(0,0,1,0),(1,0,0,1),(1,0,1,0),(2,0,1,0)}}, {'Z', new[]{(0,0,0,1),(0,1,1,0),(1,1,1,0),(2,1,0,1)}},
     };
 
-    static readonly Dictionary<char, (char id, int f, int r, int R, int C)[]> PrecomputedSolutions = new()
-    {
-        ['Y'] = new (char,int,int,int,int)[] {('F',0,0,0,0),('H',0,0,3,0),('I',0,1,5,0),('J',0,0,3,4),('T',0,3,3,3),('X',0,0,3,1),('P',1,0,2,0),('L',1,3,3,1),('N',1,0,0,1),('U',0,2,0,1),('R',0,1,1,1),('Z',0,1,0,2),('V',0,3,0,3),('W',0,0,1,3),('O',0,0,2,4)}
+    static readonly (char id, int f, int r, int R, int C)[] PrecomputedY = new (char, int, int, int, int)[] {
+        ('F',0,1,4,3),('I',0,1,5,1),('H',1,0,2,4),('N',1,0,2,3),('O',0,0,4,0),
+        ('W',0,0,2,0),('P',0,0,1,0),('V',0,2,0,0),('U',0,0,0,1),('L',0,1,0,2),
+        ('J',0,0,0,4),('R',0,3,0,3),('Z',0,1,2,1),('T',0,3,1,2),('X',0,0,3,1)
     };
 
     class Placement
@@ -49,34 +50,37 @@ class Player
             int maxX = 0, maxY = 0;
             foreach (var s in segs) { maxX = Math.Max(maxX, s.x + s.dx); maxY = Math.Max(maxY, s.y + s.dy); }
             for (int f = 0; f < 2; f++) for (int r = 0; r < 4; r++)
-            {
-                var trans = Transform(segs, f, r, maxX, maxY);
-                int w = 0, h = 0;
-                foreach (var s in trans) { w = Math.Max(w, s.x + s.dx); h = Math.Max(h, s.y + s.dy); }
-                for (int R = 0; R + w < ROWS; R++) for (int C = 0; C + h < COLS; C++)
                 {
-                    Span<int> hCount = stackalloc int[(ROWS+1)*(COLS+1)]; Span<int> vCount = stackalloc int[(ROWS+1)*(COLS+1)];
-                    ulong em=0, vh=0, vv=0, vm=0, dblH=0, dblV=0;
-                    foreach (var s in trans)
-                    {
-                        int e = EdgeIndex(s.x+R, s.y+C, s.dx, s.dy); em |= 1UL<<e;
-                        int v0 = (R+s.x)*(COLS+1)+(C+s.y); 
-                        int v1 = (R+s.x+s.dx)*(COLS+1)+(C+s.y+s.dy);
-                        vm |= 1UL<<v0; vm |= 1UL<<v1;
-                        if (s.dx==0) { 
-                            vh |= 1UL<<v0; vh |= 1UL<<v1; 
-                            if (++hCount[v0]==2) dblH |= 1UL<<v0; 
-                            if (++hCount[v1]==2) dblH |= 1UL<<v1; 
+                    var trans = Transform(segs, f, r, maxX, maxY);
+                    int w = 0, h = 0;
+                    foreach (var s in trans) { w = Math.Max(w, s.x + s.dx); h = Math.Max(h, s.y + s.dy); }
+                    for (int R = 0; R + w < ROWS; R++) for (int C = 0; C + h < COLS; C++)
+                        {
+                            Span<int> hCount = stackalloc int[(ROWS + 1) * (COLS + 1)];
+                            Span<int> vCount = stackalloc int[(ROWS + 1) * (COLS + 1)];
+                            ulong em = 0, vh = 0, vv = 0, vm = 0, dblH = 0, dblV = 0;
+                            foreach (var s in trans)
+                            {
+                                int e = EdgeIndex(s.x + R, s.y + C, s.dx, s.dy); em |= 1UL << e;
+                                int v0 = (R + s.x) * (COLS + 1) + (C + s.y);
+                                int v1 = (R + s.x + s.dx) * (COLS + 1) + (C + s.y + s.dy);
+                                vm |= 1UL << v0; vm |= 1UL << v1;
+                                if (s.dx == 0)
+                                {
+                                    vh |= 1UL << v0; vh |= 1UL << v1;
+                                    if (++hCount[v0] == 2) dblH |= 1UL << v0;
+                                    if (++hCount[v1] == 2) dblH |= 1UL << v1;
+                                }
+                                else
+                                {
+                                    vv |= 1UL << v0; vv |= 1UL << v1;
+                                    if (++vCount[v0] == 2) dblV |= 1UL << v0;
+                                    if (++vCount[v1] == 2) dblV |= 1UL << v1;
+                                }
+                            }
+                            list.Add(new Placement { id = id, f = f, r = r, R = R, C = C, Mask = em, VertMask = vm, VertH = vh, VertV = vv, DblH = dblH, DblV = dblV });
                         }
-                        else { 
-                            vv |= 1UL<<v0; vv |= 1UL<<v1; 
-                            if (++vCount[v0]==2) dblV |= 1UL<<v0; 
-                            if (++vCount[v1]==2) dblV |= 1UL<<v1; 
-                        }
-                    }
-                    list.Add(new Placement { id=id,f=f,r=r,R=R,C=C, Mask=em, VertMask=vm, VertH=vh, VertV=vv, DblH=dblH, DblV=dblV });
                 }
-            }
         }
     }
 
@@ -88,102 +92,132 @@ class Player
             var remain = Console.ReadLine().Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(s => s[0]).ToList();
             int n = int.Parse(Console.ReadLine());
             var sw = new Stopwatch();
-            
+
             ulong occupied = 0;
             for (int i = 0; i < n; i++)
             {
                 var parts = Console.ReadLine().Split(' ');
-                char id = parts[0][0]; int f = int.Parse(parts[1]), r = int.Parse(parts[2]); int R = int.Parse(parts[3]), C = int.Parse(parts[4]);
-                foreach (var s in Transform(Shapes[id], f, r, Shapes[id].Max(x=>x.x+x.dx), Shapes[id].Max(x=>x.y+x.dy)))
-                    occupied |= 1UL<<EdgeIndex(s.x+R, s.y+C, s.dx, s.dy);
+                char id = parts[0][0]; int f = int.Parse(parts[1]), r = int.Parse(parts[2]);
+                int R = int.Parse(parts[3]), C = int.Parse(parts[4]);
+                foreach (var s in Transform(Shapes[id], f, r, Shapes[id].Max(x => x.x + x.dx), Shapes[id].Max(x => x.y + x.dy)))
+                    occupied |= 1UL << EdgeIndex(s.x + R, s.y + C, s.dx, s.dy);
             }
 
             if (FirstTurn)
             {
                 FirstTurn = false;
                 sw.Restart();
-                
-                bool usedPre = false;
+
                 if (n == 0 && remain.Count == 15)
                 {
-                    var missing = Shapes.Keys.First(k => !remain.Contains(k));
-                    if (PrecomputedSolutions.TryGetValue(missing, out var seq))
+                    var missing = Shapes.Keys.FirstOrDefault(k => !remain.Contains(k));
+                    if (missing == 'Y')
                     {
-                        SolutionSequence = seq.Select(t => new Placement { id = t.id, f = t.f, r = t.r, R = t.R, C = t.C }).ToList();
-                        usedPre = true;
-                        Console.Error.WriteLine($"[DEBUG] Using precomputed solution for missing piece: {missing}");
-                    }
-                }
-
-                if (!usedPre)
-                {
-                    var edgeToColMap = new Dictionary<int, int>();
-                    for (int e = 0; e < EDGE_COUNT; e++)
-                        if ((occupied & (1UL << e)) == 0)
-                            edgeToColMap.Add(e, edgeToColMap.Count);
-                    
-                    int numEdgeCols = edgeToColMap.Count;
-                    int numShapeCols = remain.Count;
-                    int numVertexCols = (ROWS + 1) * (COLS + 1);
-                    
-                    int numPrimaryCols = numEdgeCols + numShapeCols;
-                    int numTotalCols = numPrimaryCols + numVertexCols;
-                    int maxNodes = 1200000;
-                    int maxSolutionDepth = numShapeCols;
-
-                    var solver = new AlgorithmXSolver<Placement>(numPrimaryCols, numTotalCols, maxNodes, maxSolutionDepth);
-                    for (int si = 0; si < numShapeCols; si++)
-                    {
-                        char pieceId = remain[si];
-                        foreach (var p in Placements[pieceId - 'A'])
+                        SolutionSequence = PrecomputedY
+                            .Select(t => new Placement { id = t.id, f = t.f, r = t.r, R = t.R, C = t.C }).ToList();
+                        GreedyMode = false;
+                        sw.Stop();
+                        Console.Error.WriteLine($"[DEBUG] Using precomputed solution for missing Y");
+                        Console.Error.WriteLine($"[DEBUG] Pieces in use: {string.Join(" ", remain)}; Missing: Y");
+                        Console.Error.WriteLine($"[DEBUG] Solution found in {sw.Elapsed.TotalMilliseconds:F2} ms, kind: precomputed");
+                        for (int i = 0; i < SolutionSequence.Count; ++i)
                         {
-                            if ((p.Mask & occupied) != 0) continue;
-                            var cols = new List<int>();
-                            ulong edgeMask = p.Mask;
-                            while (edgeMask != 0) { int e = BitOperations.TrailingZeroCount(edgeMask); edgeMask &= edgeMask - 1; cols.Add(edgeToColMap[e]); }
-                            cols.Add(numEdgeCols + si);
-                            ulong bends = p.DblH | p.DblV;
-                            while (bends != 0) { int v = BitOperations.TrailingZeroCount(bends); bends &= bends - 1; cols.Add(numPrimaryCols + v); }
-                            solver.AddRow(cols, p);
+                            var s = SolutionSequence[i];
+                            Console.Error.WriteLine($"[DEBUG] {i}: {s.id} {s.f} {s.r} {s.R} {s.C}");
                         }
+                        NextIndex = 0;
+                        goto Output;
                     }
-                    
-                    Placement[] solution = null; bool timedOut = false;
-                    var solveTask = Task.Run(() => solver.Solve());
-                    if (solveTask.Wait(TimeSpan.FromMilliseconds(maxSearchTimeMs))) 
-                    { 
-                        solution = solveTask.Result; 
-                    } else { timedOut = true; }
-
-                    if (timedOut) { 
-                        GreedyMode = true; 
-                        Console.Error.WriteLine("[DEBUG] Solver timed out. Switching to greedy mode."); 
-                    }
-                    else if (solution != null) { 
-                        SolutionSequence = solution.ToList(); 
-                        Console.Error.WriteLine("[DEBUG] Exact solution found by solver.");
-                    }
-                    else { throw new Exception("[DEBUG] No solution found by solver."); }
                 }
-                
+
+                var edgeToColMap = new Dictionary<int, int>();
+                for (int e = 0; e < EDGE_COUNT; e++)
+                    if ((occupied & (1UL << e)) == 0)
+                        edgeToColMap[e] = edgeToColMap.Count;
+
+                int numEdgeCols = edgeToColMap.Count;
+                int numShapeCols = remain.Count;
+                int numVertexCols = (ROWS + 1) * (COLS + 1);
+
+                int numPrimaryCols = numEdgeCols + numShapeCols;
+                int numTotalCols = numPrimaryCols + numVertexCols;
+                int maxNodes = 1200000;
+                int maxSolutionDepth = numShapeCols;
+
+                var solver = new AlgorithmXSolver<Placement>(numPrimaryCols, numTotalCols, maxNodes, maxSolutionDepth);
+
+                var colBuf = new int[60 + 15 + 49];
+                for (int si = 0; si < numShapeCols; si++)
+                {
+                    char pieceId = remain[si];
+                    foreach (var p in Placements[pieceId - 'A'])
+                    {
+                        if ((p.Mask & occupied) != 0) continue;
+                        int colCount = 0;
+                        ulong edgeMask = p.Mask;
+                        while (edgeMask != 0)
+                        {
+                            int e = BitOperations.TrailingZeroCount(edgeMask);
+                            edgeMask &= edgeMask - 1;
+                            colBuf[colCount++] = edgeToColMap[e];
+                        }
+                        colBuf[colCount++] = numEdgeCols + si;
+                        ulong bends = p.DblH | p.DblV;
+                        while (bends != 0)
+                        {
+                            int v = BitOperations.TrailingZeroCount(bends);
+                            bends &= bends - 1;
+                            colBuf[colCount++] = numPrimaryCols + v;
+                        }
+                        solver.AddRow(colBuf, colCount, p);
+                    }
+                }
+
+                Placement[] solution = null; bool timedOut = false;
+                var solveTask = Task.Run(() => solver.Solve());
+                if (solveTask.Wait(TimeSpan.FromMilliseconds(maxSearchTimeMs)))
+                {
+                    solution = solveTask.Result;
+                }
+                else { timedOut = true; }
+
+                if (timedOut)
+                {
+                    GreedyMode = true;
+                    Console.Error.WriteLine($"[DEBUG] Solver timed out. Switching to greedy mode.");
+                }
+                else if (solution != null)
+                {
+                    SolutionSequence = solution.ToList();
+                    Console.Error.WriteLine($"[DEBUG] Exact solution found by solver.");
+                }
+                else { throw new Exception(); }
                 sw.Stop();
-                Console.Error.WriteLine($"[DEBUG] Solution found in {sw.Elapsed.TotalMilliseconds:F2} ms");
+                Console.Error.WriteLine($"[DEBUG] Pieces in use: {string.Join(" ", remain)}; Missing: {new string(Shapes.Keys.Except(remain).ToArray())}");
+                Console.Error.WriteLine($"[DEBUG] Solution found in {sw.Elapsed.TotalMilliseconds:F2} ms, kind: {(timedOut ? "greedy" : "DLX")}");
+                for (int i = 0; i < SolutionSequence.Count; ++i)
+                {
+                    var s = SolutionSequence[i];
+                    Console.Error.WriteLine($"[DEBUG] {i}: {s.id} {s.f} {s.r} {s.R} {s.C}");
+                }
                 NextIndex = 0;
             }
 
+        Output:
             if (GreedyMode)
             {
                 Placement pick = null;
                 foreach (char fid in remain)
                 {
                     foreach (var p in Placements[fid - 'A'])
-                        if ((p.Mask & occupied) == 0) { 
-                            pick = p; 
-                            goto FoundGreedy; 
+                        if ((p.Mask & occupied) == 0)
+                        {
+                            pick = p;
+                            goto FoundGreedy;
                         }
                 }
-                FoundGreedy:
-                if (pick == null) throw new Exception("[DEBUG] No greedy move found.");
+            FoundGreedy:
+                if (pick == null) throw new Exception();
                 Console.WriteLine($"{pick.id} {pick.f} {pick.r} {pick.R} {pick.C}");
             }
             else
@@ -194,28 +228,28 @@ class Player
         }
     }
 
-    static (int x,int y,int dx,int dy)[] Transform((int x,int y,int dx,int dy)[] src,int flip,int rot,int maxX,int maxY)
+    static (int x, int y, int dx, int dy)[] Transform((int x, int y, int dx, int dy)[] src, int flip, int rot, int maxX, int maxY)
     {
-        var dst = new (int x,int y,int dx,int dy)[src.Length]; int i=0;
+        var dst = new (int x, int y, int dx, int dy)[src.Length]; int i = 0;
         foreach (var s in src)
         {
-            int x=s.x,y=s.y,dx=s.dx,dy=s.dy; if (flip==1) y = maxY - y - dy;
-            int cx=maxX, cy=maxY;
-            for (int k=0;k<rot;k++) { int nx=y, ny=cx-x-dx; (dx,dy,x,y)=(dy,dx,nx,ny); (cx,cy)=(cy,cx); }
-            dst[i++] = (x,y,dx,dy);
+            int x = s.x, y = s.y, dx = s.dx, dy = s.dy; if (flip == 1) y = maxY - y - dy;
+            int cx = maxX, cy = maxY;
+            for (int k = 0; k < rot; k++) { int nx = y, ny = cx - x - dx; (dx, dy, x, y) = (dy, dx, nx, ny); (cx, cy) = (cy, cx); }
+            dst[i++] = (x, y, dx, dy);
         }
         return dst;
     }
 
-    static int EdgeIndex(int x,int y,int dx,int dy)
+    static int EdgeIndex(int x, int y, int dx, int dy)
     {
-        if (dx==0 && dy==1) return x*(COLS-1)+y;
-        if (dx==1 && dy==0) return H_EDGES + x*COLS + y;
+        if (dx == 0 && dy == 1) return x * (COLS - 1) + y;
+        if (dx == 1 && dy == 0) return H_EDGES + x * COLS + y;
         throw new ArgumentException();
     }
 }
 
-public class AlgorithmXSolver<T> where T : class
+public class AlgorithmXSolver<T> where T : notnull
 {
     private struct DlxNode
     {
@@ -255,14 +289,14 @@ public class AlgorithmXSolver<T> where T : class
         _nodeCount = numTotalColumns + 1;
     }
 
-    public void AddRow(List<int> columns, T rowPayload)
+    public void AddRow(int[] columns, int count, T rowPayload)
     {
-        if (columns.Count == 0) return;
+        if (count == 0) return;
 
         int firstNode = -1;
-        foreach (int c_idx in columns)
+        for (int ci = 0; ci < count; ci++)
         {
-            int colHeaderNodeIndex = c_idx + 1;
+            int colHeaderNodeIndex = columns[ci] + 1;
             int newNodeIndex = _nodeCount++;
 
             _nodes[colHeaderNodeIndex].Size++;
@@ -304,24 +338,19 @@ public class AlgorithmXSolver<T> where T : class
             yield return result;
             yield break;
         }
-
         int c = ChooseColumn();
         Cover(c);
-
         for (int r_node = _nodes[c].Down; r_node != c; r_node = _nodes[r_node].Down)
         {
             _solution[_solutionDepth++] = _nodes[r_node].RowPayload;
-
             for (int j_node = _nodes[r_node].Right; j_node != r_node; j_node = _nodes[j_node].Right)
             {
                 Cover(_nodes[j_node].ColHeader);
             }
-
             foreach (var sol in EnumerateSolutions())
             {
                 yield return sol;
             }
-
             _solutionDepth--;
             for (int j_node = _nodes[r_node].Left; j_node != r_node; j_node = _nodes[j_node].Left)
             {
@@ -350,7 +379,6 @@ public class AlgorithmXSolver<T> where T : class
     {
         _nodes[_nodes[c].Left].Right = _nodes[c].Right;
         _nodes[_nodes[c].Right].Left = _nodes[c].Left;
-
         for (int i = _nodes[c].Down; i != c; i = _nodes[i].Down)
         {
             for (int j = _nodes[i].Right; j != i; j = _nodes[j].Right)

@@ -6,9 +6,7 @@ using System.Diagnostics;
 
 class Solution
 {
-    private static readonly Dictionary<(int, int), List<List<int>>> ComboCache = new();
-    private static readonly Dictionary<string, List<List<int>>> PermCache = new();
-
+ 
     static void Main(string[] args)
     {
         int numPuzzles = int.Parse(Console.ReadLine());
@@ -28,7 +26,7 @@ class Solution
         for (int i = 0; i < numPuzzles; i++)
         {
             var sw = Stopwatch.StartNew();
-            var killerSudokuSolver = new KillerSudokuSolver(puzzleLayouts[i], puzzleSums[i], ComboCache, PermCache);
+            var killerSudokuSolver = new KillerSudokuSolver(puzzleLayouts[i], puzzleSums[i]);
             var solvedGrid = killerSudokuSolver.Solve();
             sw.Stop();
             totalTime += sw.ElapsedMilliseconds;
@@ -62,27 +60,24 @@ class Solution
 
 public class KillerSudokuSolver
 {
+   private static readonly Dictionary<(int, int), List<List<int>>> ComboCache = new();
+
     private readonly List<Cage> _cages;
     private readonly List<Placement> _placements = new List<Placement>();
     private readonly int _numColumns;
-    private readonly Dictionary<(int, int), List<List<int>>> _comboCache;
-    private readonly Dictionary<string, List<List<int>>> _permCache;
 
-    public KillerSudokuSolver(string layout, string sums, 
-                              Dictionary<(int, int), List<List<int>>> comboCache,
-                              Dictionary<string, List<List<int>>> permCache)
+    public KillerSudokuSolver(string layout, string sums)
     {
         _cages = ParseCages(layout, sums);
         _numColumns = _cages.Count + 3 * 81;
-        _comboCache = comboCache;
-        _permCache = permCache;
     }
 
     public int[,] Solve()
     {
-        PrecomputePlacements();
-        var totalNodes = _placements.Sum(p => 1 + p.Cage.Cells.Count * 3);
+        var candidates = BuildAndFilterCandidates();
+        GeneratePlacements(candidates);
 
+        var totalNodes = _placements.Sum(p => 1 + p.Cage.Cells.Count * 3);
         var solver = new AlgorithmXSolver<Placement>(_numColumns, _numColumns, totalNodes, _cages.Count);
         
         foreach (var placement in _placements)
@@ -92,6 +87,160 @@ public class KillerSudokuSolver
         
         var solutionPlacements = solver.EnumerateSolutions().FirstOrDefault();
         return solutionPlacements != null ? DecodeSolution(solutionPlacements) : null;
+    }
+
+    private Dictionary<(int, int), HashSet<int>> BuildAndFilterCandidates()
+    {
+        var candidates = new Dictionary<(int, int), HashSet<int>>();
+        for (int r = 0; r < 9; r++)
+            for (int c = 0; c < 9; c++)
+                candidates[(r, c)] = new HashSet<int> { 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+
+        foreach (var cage in _cages)
+        {
+            var combinations = FindCombinations(cage.Sum, cage.Cells.Count);
+            var possibleValues = new HashSet<int>();
+            foreach (var combo in combinations) possibleValues.UnionWith(combo);
+            foreach (var cell in cage.Cells) candidates[cell].IntersectWith(possibleValues);
+        }
+
+        bool changed;
+        do
+        {
+            changed = false;
+            for (int r = 0; r < 9; r++)
+            {
+                for (int c = 0; c < 9; c++)
+                {
+                    if (candidates[(r, c)].Count == 1)
+                    {
+                        if (EliminateFromPeers(candidates, r, c, candidates[(r, c)].First()))
+                            changed = true;
+                    }
+                }
+            }
+
+            if (changed) continue;
+
+            for (int i = 0; i < 9; i++)
+            {
+                if (FindHiddenSinglesInRow(candidates, i)) changed = true;
+                if (FindHiddenSinglesInCol(candidates, i)) changed = true;
+                if (FindHiddenSinglesInBox(candidates, i)) changed = true;
+            }
+        } while (changed);
+
+        return candidates;
+    }
+    
+    private bool EliminateFromPeers(Dictionary<(int, int), HashSet<int>> candidates, int r, int c, int value)
+    {
+        bool changed = false;
+        for (int i = 0; i < 9; i++)
+        {
+            if (i != c && candidates[(r, i)].Remove(value)) changed = true;
+            if (i != r && candidates[(i, c)].Remove(value)) changed = true;
+        }
+        int startRow = (r / 3) * 3;
+        int startCol = (c / 3) * 3;
+        for (int r_ = startRow; r_ < startRow + 3; r_++)
+        {
+            for (int c_ = startCol; c_ < startCol + 3; c_++)
+            {
+                if ((r_ != r || c_ != c) && candidates[(r_, c_)].Remove(value))
+                    changed = true;
+            }
+        }
+        return changed;
+    }
+
+    private bool FindHiddenSinglesInUnit(Dictionary<(int, int), HashSet<int>> candidates, IEnumerable<(int,int)> unitCells)
+    {
+        bool changed = false;
+        var valuePlacements = new List<(int, int)>[10];
+        for(int i=1; i<=9; i++) valuePlacements[i] = new List<(int, int)>();
+
+        foreach(var cell in unitCells)
+        {
+            foreach(var val in candidates[cell])
+            {
+                valuePlacements[val].Add(cell);
+            }
+        }
+
+        for (int val = 1; val <= 9; val++)
+        {
+            if (valuePlacements[val].Count == 1)
+            {
+                var cell = valuePlacements[val][0];
+                if (candidates[cell].Count > 1)
+                {
+                    candidates[cell] = new HashSet<int> { val };
+                    changed = true;
+                }
+            }
+        }
+        return changed;
+    }
+    
+    private bool FindHiddenSinglesInRow(Dictionary<(int, int), HashSet<int>> candidates, int r)
+    {
+        return FindHiddenSinglesInUnit(candidates, Enumerable.Range(0, 9).Select(c => (r, c)));
+    }
+    private bool FindHiddenSinglesInCol(Dictionary<(int, int), HashSet<int>> candidates, int c)
+    {
+        return FindHiddenSinglesInUnit(candidates, Enumerable.Range(0, 9).Select(r => (r, c)));
+    }
+    private bool FindHiddenSinglesInBox(Dictionary<(int, int), HashSet<int>> candidates, int b)
+    {
+        int startRow = (b / 3) * 3;
+        int startCol = (b % 3) * 3;
+        return FindHiddenSinglesInUnit(candidates, Enumerable.Range(0, 9).Select(i => (startRow + i / 3, startCol + i % 3)));
+    }
+
+
+    private void GeneratePlacements(Dictionary<(int, int), HashSet<int>> candidates)
+    {
+        foreach (var cage in _cages)
+        {
+            var combinations = FindCombinations(cage.Sum, cage.Cells.Count);
+            foreach (var combo in combinations)
+            {
+                GenerateValidPermutationsForCage(cage, combo, candidates);
+            }
+        }
+    }
+
+    private void GenerateValidPermutationsForCage(Cage cage, List<int> combo, Dictionary<(int, int), HashSet<int>> candidates)
+    {
+        var currentPerm = new int[cage.Cells.Count];
+        var usedComboIndices = new bool[combo.Count];
+        PermuteAndPlace(0, cage, combo, candidates, currentPerm, usedComboIndices);
+    }
+    
+    private void PermuteAndPlace(int cellIndex, Cage cage, List<int> combo, Dictionary<(int, int), HashSet<int>> candidates, int[] currentPerm, bool[] usedComboIndices)
+    {
+        if (cellIndex == cage.Cells.Count)
+        {
+            _placements.Add(new Placement(cage, new List<int>(currentPerm)));
+            return;
+        }
+
+        var cell = cage.Cells[cellIndex];
+        for (int i = 0; i < combo.Count; i++)
+        {
+            if (!usedComboIndices[i])
+            {
+                int valueToPlace = combo[i];
+                if (candidates[cell].Contains(valueToPlace))
+                {
+                    usedComboIndices[i] = true;
+                    currentPerm[cellIndex] = valueToPlace;
+                    PermuteAndPlace(cellIndex + 1, cage, combo, candidates, currentPerm, usedComboIndices);
+                    usedComboIndices[i] = false;
+                }
+            }
+        }
     }
     
     private List<int> GetColumnIndices(Placement p)
@@ -133,22 +282,6 @@ public class KillerSudokuSolver
         return grid;
     }
 
-    private void PrecomputePlacements()
-    {
-        foreach (var cage in _cages)
-        {
-            var combinations = FindCombinations(cage.Sum, cage.Cells.Count);
-            foreach (var combo in combinations)
-            {
-                var permutations = GetPermutations(combo);
-                foreach (var perm in permutations)
-                {
-                    _placements.Add(new Placement(cage, perm));
-                }
-            }
-        }
-    }
-
     private static List<Cage> ParseCages(string layout, string sums)
     {
         var cageMap = new Dictionary<char, Cage>();
@@ -178,7 +311,7 @@ public class KillerSudokuSolver
     private List<List<int>> FindCombinations(int targetSum, int k)
     {
         var key = (targetSum, k);
-        if (_comboCache.TryGetValue(key, out var cachedResult))
+        if (ComboCache.TryGetValue(key, out var cachedResult))
         {
             return cachedResult;
         }
@@ -201,35 +334,7 @@ public class KillerSudokuSolver
             }
         }
         Find(1, 0, new List<int>());
-        _comboCache[key] = results;
-        return results;
-    }
-
-    private List<List<int>> GetPermutations(List<int> list)
-    {
-        var key = string.Join(",", list);
-        if (_permCache.TryGetValue(key, out var cachedResult))
-        {
-            return cachedResult;
-        }
-        
-        var results = new List<List<int>>();
-        void Permute(int[] arr, int k)
-        {
-            if (k == arr.Length)
-            {
-                results.Add(new List<int>(arr));
-                return;
-            }
-            for (var i = k; i < arr.Length; i++)
-            {
-                (arr[k], arr[i]) = (arr[i], arr[k]);
-                Permute(arr, k + 1);
-                (arr[k], arr[i]) = (arr[i], arr[k]);
-            }
-        }
-        Permute(list.ToArray(), 0);
-        _permCache[key] = results;
+        ComboCache[key] = results;
         return results;
     }
 }

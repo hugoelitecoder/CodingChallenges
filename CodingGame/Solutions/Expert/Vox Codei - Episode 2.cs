@@ -1,336 +1,542 @@
 using System;
 using System.Linq;
+using System.Text;
 using System.Collections.Generic;
+using System.Diagnostics;
 
-class Solution
+class Player
 {
     static void Main(string[] args)
     {
-        var dim = Console.ReadLine().Split(' ');
-        var w = int.Parse(dim[0]);
-        var h = int.Parse(dim[1]);
-        var game = new VoxCodei2Game(w, h);
-        var turn = 1;
+        var dimensionInputs = Console.ReadLine().Split(' ');
+        int width = int.Parse(dimensionInputs[0]);
+        int height = int.Parse(dimensionInputs[1]);
+
+        var game = new VoxCodei2Game(width, height);
+        int turn = 0;
+
         while (true)
         {
-            var st = Console.ReadLine().Split(' ');
-            var turnsLeft = int.Parse(st[0]);
-            var bombsLeft = int.Parse(st[1]);
-            var map = new List<string>();
-            for (var i = 0; i < h; i++) map.Add(Console.ReadLine());
-            var (move, units, bombs) = game.Step(turn, bombsLeft, turnsLeft, map);
-            Debug(map, units, bombs, turn, w, h);
-            Console.WriteLine(move);
             turn++;
+            string roundInfo = Console.ReadLine();
+            var gridLines = new string[height];
+            for (int y = 0; y < height; y++)
+            {
+                gridLines[y] = Console.ReadLine();
+            }
+
+            game.Update(turn, roundInfo, gridLines);
+
+            var debugGrid = game.GenerateDebugMap();
+            PrintDebugMap(debugGrid, turn, height, width);
+
+            string action = game.ComputeAction();
+
+            if (turn == 4)
+            {
+                PrintPlanDetails(game.CalculatedPlan, game.PlanCalculationTimeMs);
+            }
+
+            Console.WriteLine(action);
         }
     }
 
-    static void Debug(List<string> map, List<Node> units, List<Bomb> bombs, int turn, int w, int h)
+    private static void PrintPlanDetails(IEnumerable<BombPlan> plan, long timeMs)
     {
-        var grid = map.Select(row => row.ToCharArray()).ToArray();
-        foreach (var b in bombs)
+        if (plan == null) return;
+
+        Console.Error.WriteLine($"[DEBUG] Plan calculated in {timeMs} ms.");
+        Console.Error.WriteLine($"[DEBUG] Bombing plan has {plan.Count()} step(s):");
+        foreach (var step in plan)
         {
-            var p = b.Pos;
-            if (p.Y >= 0 && p.Y < h && p.X >= 0 && p.X < w) grid[p.Y][p.X] = '*';
+            int placementTurn = step.Turn - VoxCodei2Game.BombDelay;
+            Console.Error.WriteLine($"[DEBUG]  - Place bomb at ({step.Point.X},{step.Point.Y}) on turn {placementTurn} to explode on turn {step.Turn}.");
         }
-        foreach (var u in units)
-        {
-            var p = u.At(turn);
-            if (p.Y >= 0 && p.Y < h && p.X >= 0 && p.X < w) grid[p.Y][p.X] = (char)('0' + u.Id % 10);
-        }
+    }
+
+    private static void PrintDebugMap(char[,] debugGrid, int turn, int height, int width)
+    {
         Console.Error.WriteLine($"[DEBUG] Turn {turn}");
-        foreach (var row in grid) Console.Error.WriteLine($"[DEBUG] {new string(row)}");
+        for (int y = 0; y < height; y++)
+        {
+            var row = new StringBuilder();
+            for (int x = 0; x < width; x++)
+            {
+                row.Append(debugGrid[x, y]);
+            }
+            Console.Error.WriteLine($"[DEBUG] {row}");
+        }
+    }
+}
+
+public readonly record struct Point(int X, int Y)
+{
+    public static Point FromPos(int position, int width) => new(position % width, position / width);
+    public int ToPos(int width) => Y * width + X;
+    public static Point operator +(Point a, Point b) => new(a.X + b.X, a.Y + b.Y);
+    public static Point operator *(Point p, int scalar) => new(p.X * scalar, p.Y * scalar);
+}
+
+public readonly record struct BombPlan(int Turn, Point Point);
+public readonly record struct NodeMovement(int Position, int Speed);
+public readonly record struct BombingInfo(Point Point, int Hits);
+
+public struct AreaScanInfo
+{
+    public Point Point { get; }
+    public int Hits { get; set; }
+    public bool HasNode { get; set; }
+
+    public AreaScanInfo(Point point, int hits, bool hasNode)
+    {
+        Point = point;
+        Hits = hits;
+        HasNode = hasNode;
+    }
+}
+
+public class GridHistory
+{
+    private readonly Dictionary<int, char[]> grids = new();
+    public void Add(int turn, char[] grid) => grids[turn] = grid;
+    public char[] Get(int turn) => grids.GetValueOrDefault(turn);
+    public char[] Turn1 => Get(1);
+    public char[] Turn2 => Get(2);
+    public char[] Turn3 => Get(3);
+}
+
+public class GameState
+{
+    public int BombCount, TurnCount, Turn;
+    public char[] CurrentGrid;
+    public readonly GridHistory InitialGrids = new();
+    public readonly List<Node> Nodes = new();
+    public readonly List<Area> Areas = new();
+}
+
+public readonly struct Node
+{
+    public int Id { get; }
+    public Point[] Path { get; }
+
+    public Node(int id, Point[] path)
+    {
+        Id = (int)Math.Pow(2, id);
+        Path = path;
+    }
+}
+
+public class Area
+{
+    public int Target { get; }
+    public bool[] Cover { get; }
+    public List<BombingInfo>[] Infos { get; }
+
+    public Area(int target, bool[] cover, List<BombingInfo>[] infos)
+    {
+        Target = target;
+        Cover = cover;
+        Infos = infos;
     }
 }
 
 public class VoxCodei2Game
 {
-    // Tweakable performance constants
-    public const int PathRounds = 100;
-    public const int BlastRadius = 3;
-    public const int WaitTurns = 3;
-    public const int MaxBranch = 15;
+    private const int MaxSearchDepth = 50;
+    public const char WallChar = '#', NodeChar = '@';
+    public const int BombDelay = 3, BombRange = 3;
+    private static readonly Point[] Directions = { new(0, 1), new(0, -1), new(1, 0), new(-1, 0) };
 
-    readonly int _w, _h;
-    readonly char[,] _wall;
-    readonly List<Node> _units = new();
-    readonly List<Bomb> _bombs = new();
-    bool _detected;
-    readonly List<List<string>> _obs = new();
-    public BombPlan _plan;
-    static readonly Point[] Dir = { new(0, -1), new(0, 1), new(-1, 0), new(1, 0), new(0, 0) };
+    private readonly int width, height, gridSize;
+    private readonly GameState State = new();
+    private List<BombPlan> actions = null;
+    private bool[] destroyedNodes;
 
-    public VoxCodei2Game(int w, int h)
+    private int SolverTarget, SolverBombsLeft;
+    private Area SolverArea;
+    private HashSet<int>[] SolverDone;
+    private readonly HashSet<int> SolverFailures = new();
+    private readonly HashSet<int> SolverExcludedTurns = new();
+
+    public IEnumerable<BombPlan> CalculatedPlan { get; private set; }
+    public long PlanCalculationTimeMs { get; private set; } = -1;
+
+    public VoxCodei2Game(int width, int height)
     {
-        _w = w; _h = h; _wall = new char[h, w];
+        this.width = width;
+        this.height = height;
+        this.gridSize = width * height;
     }
 
-    public (string, List<Node>, List<Bomb>) Step(int turn, int bombsLeft, int turnsLeft, List<string> map)
+    public void Update(int turn, string roundInfo, string[] gridLines)
     {
-        UpdateBombs(turn);
+        State.Turn = turn;
+        State.CurrentGrid = ParseGrid(gridLines);
 
-        if (turn <= WaitTurns)
+        if (actions != null)
         {
-            _obs.Add(map);
-            return ("WAIT", new List<Node>(), _bombs);
-        }
-
-        if (!_detected)
-        {
-            DetectUnits();
-            if (!_detected) return ("WAIT", new List<Node>(), _bombs);
-        }
-
-        RemoveMissing(map, turn);
-
-        var live = _units.Where(u => !u.Dead).ToList();
-        if (!live.Any()) return ("WAIT", live, _bombs);
-
-        if (_plan == null || _plan.Done(turn) || _plan.AllDead())
-            _plan = BombPlanFinder.Best(live, _bombs, turn, bombsLeft, turnsLeft, _w, _h, _wall);
-
-        var bomb = _plan.BombAt(turn);
-        if (bomb.HasValue)
-        {
-            _bombs.Add(new Bomb(bomb.Value, turn));
-            return ($"{bomb.Value.X} {bomb.Value.Y}", live, _bombs);
-        }
-        return ("WAIT", live, _bombs);
-    }
-
-    void DetectUnits()
-    {
-        for (var y = 0; y < _h; y++)
-            for (var x = 0; x < _w; x++)
-                _wall[y, x] = _obs[0][y][x] == '#' ? '#' : '.';
-
-        var s1 = GetUnits(_obs[0]);
-        var s2 = GetUnits(_obs[1]).ToHashSet();
-        var s3 = GetUnits(_obs[2]).ToHashSet();
-
-        var all = s1.Select(pos1 =>
-            Dir.Select(vel => Node.Step(pos1, vel, _w, _h, _wall))
-            .Select(t1 =>
+            foreach (var plan in actions.Where(p => p.Turn == State.Turn))
             {
-                var t2 = Node.Step(t1.pos, t1.vel, _w, _h, _wall);
-                return new Path(pos1, t1.pos, t2.pos, t1.vel);
-            })
-            .Where(p => s2.Contains(p.P2) && s3.Contains(p.P3)).ToList()
-        ).ToList();
-
-        var found = new List<Path>();
-        if (Find(all, 0, new List<Path>(), found, s2, s3))
-        {
-            _detected = true;
-            _units.AddRange(found.Select((p, i) => new Node(i, p.P1, p.Vel)));
-            foreach (var u in _units) u.Cache(PathRounds, _w, _h, _wall);
-        }
-    }
-
-    static bool Find(List<List<Path>> all, int idx, List<Path> cur, List<Path> fin, ISet<Point> s2, ISet<Point> s3)
-    {
-        if (idx == all.Count)
-        {
-            if (cur.Select(p => p.P2).ToHashSet().SetEquals(s2) && cur.Select(p => p.P3).ToHashSet().SetEquals(s3))
-            {
-                fin.AddRange(cur);
-                return true;
-            }
-            return false;
-        }
-        foreach (var p in all[idx])
-        {
-            cur.Add(p);
-            if (Find(all, idx + 1, cur, fin, s2, s3)) return true;
-            cur.RemoveAt(cur.Count - 1);
-        }
-        return false;
-    }
-
-    void UpdateBombs(int turn)
-    {
-        var now = _bombs.Where(b => b.Explode == turn).ToList();
-        if (!now.Any()) return;
-        var done = new HashSet<Bomb>();
-        while (now.Any())
-        {
-            foreach (var b in now) done.Add(b);
-            var blast = now.SelectMany(b => BombPlanFinder.Blast(b.Pos, _w, _h, _wall)).ToHashSet();
-            now = _bombs.Where(b => !done.Contains(b) && blast.Contains(b.Pos)).ToList();
-        }
-        var area = done.SelectMany(b => BombPlanFinder.Blast(b.Pos, _w, _h, _wall)).ToHashSet();
-        foreach (var u in _units.Where(u => !u.Dead && area.Contains(u.At(turn))))
-            u.Dead = true;
-        _bombs.RemoveAll(b => done.Contains(b));
-    }
-
-    void RemoveMissing(List<string> map, int turn)
-    {
-        var posSet = GetUnits(map).ToHashSet();
-        foreach (var u in _units.Where(u => !u.Dead))
-            if (!posSet.Contains(u.At(turn)))
-                u.Dead = true;
-    }
-
-    List<Point> GetUnits(List<string> map) =>
-        Enumerable.Range(0, _h).SelectMany(y =>
-            Enumerable.Range(0, _w)
-                .Where(x => map[y][x] == '@')
-                .Select(x => new Point(x, y))
-        ).ToList();
-}
-
-public static class BombPlanFinder
-{
-    static readonly int[] dx = { 0, 0, -1, 1 };
-    static readonly int[] dy = { -1, 1, 0, 0 };
-    static Dictionary<(HashSet<Node>, int), BombPlan> _cache;
-    static int _limit;
-
-    public static BombPlan Best(List<Node> units, List<Bomb> bombs, int turn, int bombsLeft, int turnsLeft, int w, int h, char[,] wall)
-    {
-        _cache = new Dictionary<(HashSet<Node>, int), BombPlan>(new UnitSetCmp());
-        _limit = turn + turnsLeft;
-        var doomed = bombs.SelectMany(b => units.Where(u => Blast(b.Pos, w, h, wall).Contains(u.At(b.Explode)))).ToHashSet();
-        var toHit = units.Except(doomed).ToHashSet();
-        if (!toHit.Any()) return new BombPlan(new List<BombStep>());
-        var steps = Steps(toHit, turn, w, h, wall);
-        var byUnit = toHit.ToDictionary(u => u, u => steps.Where(s => s.Targets.Contains(u)).ToList());
-        return Plan(toHit, bombsLeft, byUnit, turn) ?? new BombPlan(new List<BombStep>());
-    }
-
-    static BombPlan Plan(HashSet<Node> hit, int bombs, Dictionary<Node, List<BombStep>> byUnit, int minTurn)
-    {
-        if (!hit.Any()) return new BombPlan(new List<BombStep>());
-        if (bombs == 0) return null;
-        var key = (hit, minTurn);
-        if (_cache.TryGetValue(key, out var found)) return found;
-        Node tgt = null; var min = int.MaxValue;
-        foreach (var u in hit)
-        {
-            var cnt = byUnit[u].Count(s => s.Turn >= minTurn);
-            if (cnt < min) { min = cnt; tgt = u; }
-        }
-        if (tgt == null || !byUnit[tgt].Any(s => s.Turn >= minTurn)) { _cache[key] = null; return null; }
-        var candidates = byUnit[tgt].Where(s => s.Turn >= minTurn && s.Explode < _limit)
-            .OrderByDescending(s => s.Targets.Count(hit.Contains)).ThenBy(s => s.Explode).Take(VoxCodei2Game.MaxBranch);
-        foreach (var s in candidates)
-        {
-            var left = new HashSet<Node>(hit); left.ExceptWith(s.Targets);
-            var sub = Plan(left, bombs - 1, byUnit, s.Turn + 1);
-            if (sub != null)
-            {
-                var plan = new BombPlan(new List<BombStep>(sub.Steps) { s });
-                _cache[key] = plan;
-                return plan;
+                var explosionPoints = new HashSet<Point>(BombHits(plan.Point));
+                for (int i = 0; i < State.Nodes.Count; i++)
+                {
+                    if (destroyedNodes[i]) continue;
+                    if (State.Turn < State.Nodes[i].Path.Length)
+                    {
+                        Point nodePos = State.Nodes[i].Path[State.Turn];
+                        if (explosionPoints.Contains(nodePos))
+                        {
+                            destroyedNodes[i] = true;
+                        }
+                    }
+                }
             }
         }
-        _cache[key] = null;
-        return null;
+
+        if (turn <= 3)
+        {
+            State.InitialGrids.Add(turn, State.CurrentGrid);
+        }
+
+        if (turn == 1)
+        {
+            var inputs = roundInfo.Split(' ');
+            State.TurnCount = int.Parse(inputs[0]) + 1;
+            State.BombCount = int.Parse(inputs[1]);
+        }
     }
 
-    static List<BombStep> Steps(HashSet<Node> units, int turn, int w, int h, char[,] wall)
+    public char[,] GenerateDebugMap()
     {
-        var posByTurn = Enumerable.Range(turn, Math.Max(0, _limit - turn)).ToDictionary(r => r, _ => new HashSet<Point>());
-        foreach (var u in units) foreach (var r in posByTurn.Keys) if (r < VoxCodei2Game.PathRounds) posByTurn[r].Add(u.At(r));
-        var res = new List<BombStep>();
-        for (var y = 0; y < h; y++) for (var x = 0; x < w; x++)
+        var debugGrid = new char[width, height];
+        var baseGrid = State.CurrentGrid ?? State.InitialGrids.Turn1;
+        if (baseGrid == null) return debugGrid;
+
+        for (int i = 0; i < gridSize; i++)
         {
-            if (wall[y, x] == '#') continue;
-            var p = new Point(x, y);
-            var area = Blast(p, w, h, wall);
-            foreach (var t in posByTurn.Keys)
+            debugGrid[i % width, i / width] = baseGrid[i];
+        }
+
+        if (State.Nodes.Any())
+        {
+            for (int i = 0; i < gridSize; i++)
             {
-                if (t + VoxCodei2Game.BlastRadius >= _limit || posByTurn[t].Contains(p)) continue;
-                var exp = t + VoxCodei2Game.BlastRadius;
-                var targets = units.Where(u => area.Contains(u.At(exp))).ToHashSet();
-                if (targets.Any()) res.Add(new BombStep(p, t, exp, targets));
+                if (debugGrid[i % width, i / width] == NodeChar)
+                {
+                    debugGrid[i % width, i / width] = '.';
+                }
+            }
+
+            for (int i = 0; i < State.Nodes.Count; i++)
+            {
+                if (destroyedNodes[i]) continue;
+
+                var node = State.Nodes[i];
+                if (State.Turn < node.Path.Length)
+                {
+                    Point nodePos = node.Path[State.Turn];
+                    char nodeChar = i < 10 ? (char)('0' + i) : (char)('A' + i - 10);
+                    debugGrid[nodePos.X, nodePos.Y] = nodeChar;
+                }
+            }
+
+            if (actions != null)
+            {
+                foreach (var plan in actions)
+                {
+                    int placementTurn = plan.Turn - BombDelay;
+                    if (State.Turn >= placementTurn && State.Turn < plan.Turn)
+                    {
+                        debugGrid[plan.Point.X, plan.Point.Y] = 'B';
+                    }
+                }
+
+                foreach (var plan in actions.Where(p => p.Turn == State.Turn))
+                {
+                    foreach (var explosionPoint in BombHits(plan.Point))
+                    {
+                        debugGrid[explosionPoint.X, explosionPoint.Y] = 'X';
+                    }
+                }
             }
         }
-        return res;
+
+        return debugGrid;
     }
 
-    public static HashSet<Point> Blast(Point p, int w, int h, char[,] wall)
+    public string ComputeAction()
     {
-        var area = new HashSet<Point> { p };
-        for (int d = 0; d < 4; d++)
+        if (State.Turn == 3)
         {
-            for (int i = 1; i <= VoxCodei2Game.BlastRadius; i++)
+            IdentifyNodes();
+            ScanAreas();
+        }
+        else if (State.Turn == 4)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            actions = OptimizeBombing().SelectMany(actionList => actionList).OrderBy(action => action.Turn).ToList();
+            stopwatch.Stop();
+
+            PlanCalculationTimeMs = stopwatch.ElapsedMilliseconds;
+            CalculatedPlan = actions;
+        }
+
+        var action = actions?.Find(action => action.Turn - BombDelay == State.Turn) ?? default;
+        if (action != default)
+            return $"{action.Point.X} {action.Point.Y}";
+
+        return "WAIT";
+    }
+
+    private char[] ParseGrid(string[] gridLines)
+    {
+        if (gridLines == null) return null;
+        var grid = new char[gridSize];
+        for (int y = 0; y < height; y++)
+            gridLines[y].ToCharArray().CopyTo(grid, y * width);
+        return grid;
+    }
+
+    private IEnumerable<Point> GetNeighbors(Point point)
+    {
+        foreach (var direction in Directions)
+        {
+            var neighbor = point + direction;
+            if (neighbor.X >= 0 && neighbor.X < width && neighbor.Y >= 0 && neighbor.Y < height)
             {
-                var nx = p.X + dx[d] * i;
-                var ny = p.Y + dy[d] * i;
-                if (nx < 0 || ny < 0 || nx >= w || ny >= h || wall[ny, nx] == '#') break;
-                area.Add(new Point(nx, ny));
+                yield return neighbor;
             }
         }
-        return area;
     }
-}
 
-public class Node
-{
-    public int Id { get; }
-    public bool Dead;
-    readonly Point _start, _vel;
-    Point[] _cache;
-    public Node(int id, Point pos, Point vel) { Id = id; _start = pos; _vel = vel; }
-    public void Cache(int rounds, int w, int h, char[,] wall)
+    private IEnumerable<Point> BombHits(Point point)
     {
-        _cache = new Point[rounds];
-        _cache[0] = new Point(-1, -1);
-        var p = _start; var v = _vel;
-        for (var i = 1; i < rounds; i++)
+        yield return point;
+        foreach (var direction in Directions)
         {
-            _cache[i] = p;
-            (p, v) = Step(p, v, w, h, wall);
+            for (int distance = 1; distance <= BombRange; distance++)
+            {
+                var nextPoint = point + direction * distance;
+                if (nextPoint.X < 0 || nextPoint.X >= width || nextPoint.Y < 0 || nextPoint.Y >= height || State.InitialGrids.Turn1[nextPoint.ToPos(width)] == WallChar)
+                {
+                    break;
+                }
+                yield return nextPoint;
+            }
         }
     }
-    public Point At(int turn) => _cache[turn];
-    public static (Point pos, Point vel) Step(Point pos, Point vel, int w, int h, char[,] wall)
+
+    private void IdentifyNodes()
     {
-        var next = new Point(pos.X + vel.X, pos.Y + vel.Y);
-        var nv = vel;
-        if (next.X < 0 || next.X >= w || next.Y < 0 || next.Y >= h || wall[next.Y, next.X] == '#')
-            nv = new Point(-vel.X, -vel.Y);
-        return (new Point(pos.X + nv.X, pos.Y + nv.Y), nv);
-    }
-    public override int GetHashCode() => Id;
-    public override bool Equals(object obj) => obj is Node n && n.Id == Id;
-}
+        var staticGrid = State.InitialGrids.Turn1;
+        static int countNodes(char[] grid) => grid.Count(c => c == NodeChar);
+        NodeMovement nextTurn(int position, int speed)
+        {
+            if (speed == 1 && (position % width == width - 1 || staticGrid[position + 1] == WallChar) ||
+                speed == -1 && (position % width == 0 || staticGrid[position - 1] == WallChar) ||
+                speed == width && (position >= width * (height - 1) || staticGrid[position + width] == WallChar) ||
+                speed == -width && (position < width || staticGrid[position - width] == WallChar))
+                speed = -speed;
+            return new NodeMovement(position + speed, speed);
+        }
 
-public class BombPlan
-{
-    public List<BombStep> Steps { get; }
-    int _last;
-    public BombPlan(List<BombStep> steps)
+        var offsets = new int[5] { 0, 1, -1, width, -width };
+        bool noDuplicates = countNodes(staticGrid) >= Math.Max(countNodes(State.InitialGrids.Turn2), countNodes(State.InitialGrids.Turn3));
+
+        for (int position = 0; position < gridSize; position++)
+        {
+            if (staticGrid[position] != NodeChar) continue;
+
+            foreach (var movement1 in offsets.Select(speed => nextTurn(position, speed)))
+            {
+                if (State.InitialGrids.Turn2[movement1.Position] != NodeChar) continue;
+
+                var movement2 = nextTurn(movement1.Position, movement1.Speed);
+                if (State.InitialGrids.Turn3[movement2.Position] != NodeChar) continue;
+
+                var path = new Point[State.TurnCount];
+                path[1] = Point.FromPos(position, width);
+                path[2] = Point.FromPos(movement1.Position, width);
+
+                int currentPos = movement2.Position;
+                int currentSpeed = movement2.Speed;
+                for (int i = 3; i < State.TurnCount; i++)
+                {
+                    path[i] = Point.FromPos(currentPos, width);
+                    var nextMovement = nextTurn(currentPos, currentSpeed);
+                    currentPos = nextMovement.Position;
+                    currentSpeed = nextMovement.Speed;
+                }
+
+                State.Nodes.Add(new Node(State.Nodes.Count, path));
+                if (noDuplicates) break;
+            }
+        }
+        destroyedNodes = new bool[State.Nodes.Count];
+    }
+
+    private void ScanAreas()
     {
-        Steps = steps.OrderBy(s => s.Turn).ToList();
-        _last = Steps.Any() ? Steps.Max(s => s.Turn) : -1;
+        for (int position = 0; position < gridSize; position++)
+            if (State.InitialGrids.Turn1[position] != WallChar && !State.Areas.Any(area => area.Cover[position]))
+            {
+                var area = ScanArea(Point.FromPos(position, width));
+                if (area != null) State.Areas.Add(area);
+            }
     }
-    public bool Done(int turn) => turn > _last;
-    public Point? BombAt(int turn) => Steps.FirstOrDefault(s => s.Turn == turn)?.Pos;
-    public bool AllDead() => Steps.All(s => s.Targets.All(n => n.Dead));
-}
 
-public record Bomb(Point Pos, int Turn)
-{
-    public int Explode => Turn + VoxCodei2Game.BlastRadius;
-}
+    private Area ScanArea(Point startPoint)
+    {
+        var cover = new bool[gridSize];
+        bool containsNode = false;
+        var queue = new Queue<Point>(gridSize);
 
-public record BombStep(Point Pos, int Turn, int Explode, HashSet<Node> Targets);
+        queue.Enqueue(startPoint);
+        cover[startPoint.ToPos(width)] = true;
 
-public readonly record struct Point(int X, int Y)
-{
-    public override string ToString() => $"{X} {Y}";
-}
+        while (queue.Count > 0)
+        {
+            var currentPoint = queue.Dequeue();
+            foreach (var neighbor in GetNeighbors(currentPoint))
+            {
+                int neighborPosition = neighbor.ToPos(width);
+                if (State.InitialGrids.Turn1[neighborPosition] != WallChar && !cover[neighborPosition])
+                {
+                    containsNode |= State.InitialGrids.Turn1[neighborPosition] == NodeChar;
+                    queue.Enqueue(neighbor);
+                    cover[neighborPosition] = true;
+                }
+            }
+        }
+        if (!containsNode) return null;
 
-public record Path(Point P1, Point P2, Point P3, Point Vel);
+        int target = 0;
+        var infos = new Dictionary<Point, AreaScanInfo>[State.TurnCount];
+        for (int turn = 0; turn < State.TurnCount; turn++)
+            infos[turn] = new Dictionary<Point, AreaScanInfo>();
 
-public class UnitSetCmp : IEqualityComparer<(HashSet<Node> units, int turn)>
-{
-    public bool Equals((HashSet<Node> units, int turn) x, (HashSet<Node> units, int turn) y) =>
-        x.turn == y.turn && x.units.SetEquals(y.units);
+        foreach (var node in State.Nodes)
+        {
+            if (State.Turn >= node.Path.Length || !cover[node.Path[State.Turn].ToPos(width)]) continue;
+            target |= node.Id;
+            for (int turn = State.Turn; turn < State.TurnCount; turn++)
+            {
+                Point nodeLocation = node.Path[turn];
+                if (turn < State.TurnCount - BombDelay)
+                {
+                    if (infos[turn + BombDelay].TryGetValue(nodeLocation, out var info))
+                    {
+                        info.HasNode = true;
+                        infos[turn + BombDelay][nodeLocation] = info;
+                    }
+                    else
+                    {
+                        infos[turn + BombDelay][nodeLocation] = new AreaScanInfo(nodeLocation, 0, true);
+                    }
+                }
 
-    public int GetHashCode((HashSet<Node> units, int turn) obj) =>
-        obj.units.OrderBy(n => n.Id).Aggregate(obj.turn, (h, n) => h * 31 + n.GetHashCode());
+                if (!infos[turn].ContainsKey(nodeLocation))
+                    infos[turn][nodeLocation] = new AreaScanInfo(nodeLocation, node.Id, false);
+
+                foreach (Point hitLocation in BombHits(nodeLocation))
+                {
+                    if (infos[turn].TryGetValue(hitLocation, out var info))
+                    {
+                        if ((info.Hits & node.Id) == 0)
+                        {
+                            info.Hits |= node.Id;
+                            infos[turn][hitLocation] = info;
+                        }
+                    }
+                    else
+                    {
+                        infos[turn][hitLocation] = new AreaScanInfo(hitLocation, node.Id, false);
+                    }
+                }
+            }
+        }
+
+        var cleanedUpInfos = new List<BombingInfo>[State.TurnCount];
+        for (int i = 0; i < infos.Length; i++)
+            cleanedUpInfos[i] = infos[i].Values
+                .Where(info => !info.HasNode && info.Hits != 0)
+                .Select(info => new BombingInfo(info.Point, info.Hits))
+                .OrderByDescending(info => info.Hits)
+                .Take(MaxSearchDepth)
+                .ToList();
+
+        return new Area(target, cover, cleanedUpInfos);
+    }
+
+    private List<List<BombPlan>> OptimizeBombing()
+    {
+        SolverBombsLeft = State.BombCount;
+        SolverDone = Enumerable.Range(0, State.TurnCount).Select(_ => new HashSet<int>()).ToArray();
+        var sequences = new List<List<BombPlan>>(State.Areas.Count);
+        foreach (var area in State.Areas)
+        {
+            var sequence = FindSequenceForArea(area);
+            SolverBombsLeft -= sequence.Count;
+            foreach (var action in sequence) _ = SolverExcludedTurns.Add(action.Turn);
+            sequences.Add(sequence);
+        }
+        return sequences;
+    }
+
+    private List<BombPlan> FindSequenceForArea(Area area)
+    {
+        SolverArea = area;
+        SolverTarget = 0;
+        int firstTurn = State.Turn + BombDelay;
+
+        foreach (var node in State.Nodes)
+        {
+            if (firstTurn < node.Path.Length && area.Cover[node.Path[firstTurn].ToPos(width)])
+            {
+                SolverTarget |= node.Id;
+            }
+        }
+
+        for (int bombCount = 1; bombCount <= SolverBombsLeft; bombCount++)
+        {
+            SolverFailures.Clear();
+            var sequence = FindSequenceRecursive(firstTurn, bombCount, 0);
+            if (sequence != null)
+            {
+                sequence.Reverse();
+                return sequence;
+            }
+        }
+        throw new InvalidOperationException("No sequence found");
+    }
+
+    private List<BombPlan> FindSequenceRecursive(int turn, int bombsLeft, int currentCoverage)
+    {
+        if (SolverExcludedTurns.Contains(turn))
+            return turn != State.TurnCount - 1 ? FindSequenceRecursive(turn + 1, bombsLeft, currentCoverage) : null;
+        int hash = HashCode.Combine(turn, bombsLeft, currentCoverage);
+        if (SolverFailures.Contains(hash)) return null;
+
+        SolverDone[turn].Clear();
+        bool followUp = bombsLeft > 1 && turn != State.TurnCount - 1;
+        foreach (var bombingInfo in SolverArea.Infos[turn])
+        {
+            if (!SolverDone[turn].Add(bombingInfo.Hits)) continue;
+            int nextCoverage = currentCoverage | bombingInfo.Hits;
+            if (nextCoverage == currentCoverage) continue;
+            if (nextCoverage == SolverTarget) return new List<BombPlan> { new(turn, bombingInfo.Point) };
+            if (followUp)
+            {
+                var sequence = FindSequenceRecursive(turn + 1, bombsLeft - 1, nextCoverage);
+                if (sequence != null)
+                {
+                    sequence.Add(new BombPlan(turn, bombingInfo.Point));
+                    return sequence;
+                }
+            }
+        }
+        var resultOfPassing = turn != State.TurnCount - 1 ? FindSequenceRecursive(turn + 1, bombsLeft, currentCoverage) : null;
+        if (resultOfPassing == null) _ = SolverFailures.Add(hash);
+        return resultOfPassing;
+    }
 }

@@ -187,9 +187,9 @@ public class PascalCompiler
         if (_errorMessage == null) _errorMessage = $"Line {line}: {message}";
         throw new ParsingException();
     }
-
+    
     private void ParseProgram() { ParseBlock(); if (!Accept(".", true)) Error(Peek().Line, "Invalid program"); }
-
+    
     private void ParseBlock()
     {
         var jumpIndex = _instructions.Count;
@@ -353,7 +353,7 @@ public class PascalCompiler
     private void ParseExpression()
     {
         var isNegative = Accept("-", true);
-        if (!isNegative) Accept("+", true);
+        if(!isNegative) Accept("+", true);
 
         ParseTerm();
         if (isNegative) EmitInstruction("opr", 0, 1);

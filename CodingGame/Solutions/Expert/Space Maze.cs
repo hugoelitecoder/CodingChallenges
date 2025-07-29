@@ -361,19 +361,41 @@ class Board : IEquatable<Board>
     {
         if (!Car.Equals(Parent.Car) && (!(Car.Cell is Platform) || !(Parent.Car.Cell is Platform) ||
             ((Platform)Car.Cell).Id != ((Platform)Parent.Car.Cell).Id))
-            return Distances[GetIndex(Car.Cell), GetIndex(Parent.Car.Cell)];
+        {
+            var dist = Distances[GetIndex(Car.Cell), GetIndex(Parent.Car.Cell)];
+            if (dist == -1) dist = 1;
+            return dist;
+        }
+
         var lastPlat = Platforms[Platforms.Count - 1];
         if (lastPlat.Moved)
         {
-            if (Car.Cell == lastPlat) return 1;
+            if (Car.Cell == lastPlat)
+                return 1;
+
             var prev = Parent.Platforms.Find(p => p.Id == lastPlat.Id);
             if (!prev.Moved)
             {
-                if (lastPlat.Directions.Count > 1 && Distances[GetIndex(Car.Cell), GetIndex(prev)] == -1 && Distances[GetIndex(Car.Cell), GetIndex(lastPlat)] != -1)
-                    return 2;
-                return 20;
+                var platMoveDist = Distances[GetIndex(lastPlat), GetIndex(prev)];
+                if (platMoveDist == -1) platMoveDist = 20;
+
+                bool isOffMap = lastPlat.X < 0 || lastPlat.X >= Board.Width || lastPlat.Y < 0 || lastPlat.Y >= Board.Height;
+                bool isOnVoid = !isOffMap && Board.Cells[lastPlat.X, lastPlat.Y].Symbol == '#';
+
+                if (isOffMap || isOnVoid)
+                    return 50;
+
+                var oldDist = Distances[GetIndex(Car.Cell), GetIndex(TargetCell)];
+                var newDist = Distances[GetIndex(lastPlat), GetIndex(TargetCell)];
+                bool moveImprovesPath = newDist >= 0 && newDist < oldDist;
+
+                if (moveImprovesPath)
+                    return Math.Min(platMoveDist, 3);
+
+                return Math.Min(platMoveDist, 20);
             }
         }
+
         return 1;
     }
 

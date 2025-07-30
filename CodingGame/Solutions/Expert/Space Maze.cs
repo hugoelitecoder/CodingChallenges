@@ -385,8 +385,8 @@ class Board : IEquatable<Board>
                 if (isOffMap || isOnVoid)
                     return 50;
 
-                var oldDist = Distances[GetIndex(Car.Cell), GetIndex(TargetCell)];
-                var newDist = Distances[GetIndex(lastPlat), GetIndex(TargetCell)];
+                var oldDist = Distances[GetIndex(Parent.Car.Cell), GetIndex(TargetCell)];
+                var newDist = Distances[GetIndex(Car.Cell), GetIndex(TargetCell)];
                 bool moveImprovesPath = newDist >= 0 && newDist < oldDist;
 
                 if (moveImprovesPath)

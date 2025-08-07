@@ -1,224 +1,156 @@
 using System;
-using System.Linq;
-using System.IO;
-using System.Text;
-using System.Collections;
 using System.Collections.Generic;
+
+public readonly struct Point
+{
+    public int X { get; }
+    public int Y { get; }
+    public Point(int x, int y) { X = x; Y = y; }
+}
 
 class Player
 {
-    class Point2D {
-        public Point2D(int x, int y){
-           this.X = x;
-           this.Y = y;
-        }
-        
-        public int X { get; set; }
-        public int Y { get; set ; }
-    }
-    
-    class Spaceship {
-        
-        public int X { get; set;}
-        public int Y { get; set;}
-        public int HSpeed { get; set;}
-        public int VSpeed { get; set;}
-        public int Fuel { get; set; }
-        public int Rotate { get; set; }
-        public int Power { get; set; }
-        
-        public Spaceship(){
-        }
-        
-        public void ReadInputs() {
-            string[] inputs = Console.ReadLine().Split(' ');
-            this.X = int.Parse(inputs[0]);
-            this.Y = int.Parse(inputs[1]);
-            this.HSpeed = int.Parse(inputs[2]); // the horizontal speed (in m/s), can be negative.
-            this.VSpeed = int.Parse(inputs[3]); // the vertical speed (in m/s), can be negative.
-            this.Fuel = int.Parse(inputs[4]); // the quantity of remaining fuel in liters.
-            this.Rotate = int.Parse(inputs[5]); // the rotation angle in degrees (-90 to 90).
-            this.Power = int.Parse(inputs[6]); // the thrust power (0 to 4).
-        }
-        
-    }
-    
-    struct SpaceshipAction {
-        
-        public SpaceshipAction(int rotate, int power){
-            this.Rotate = rotate;
-            this.Power = power;
-        }
-        
-        public int Rotate;
-        public int Power;
-        
-    }
-    
-    class Surfacespace {
-        
-        public Surfacespace(Point2D start, Point2D end)
-        {
-            this.Start = start;
-            this.End = end;
-        }
-        
-        public Point2D Start { get; set; }
-        public Point2D End { get; set; }
-        
-    }
-    
-    static List<Point2D> ReadSurface() {
-        string[] inputs;
-        int surfaceN = int.Parse(Console.ReadLine()); // the number of points used to draw the surface of Mars.
-        List<Point2D> surface = new List<Point2D>();
-        for (int i = 0; i < surfaceN; i++)
-        {
-            inputs = Console.ReadLine().Split(' ');
-            int landX = int.Parse(inputs[0]); 
-            int landY = int.Parse(inputs[1]); 
-            var point = new Point2D(landX,landY);
-            Console.Error.WriteLine($"POINT => {point.X}, {point.Y}");
-            surface.Add(point);
-        }
-        return surface;
-    }
-    
-    static List<Surfacespace> FindLandingSpaces(List<Point2D> surface){
-        List<Surfacespace> landingspaces = new List<Surfacespace>();
-        for(int l=0; l < surface.Count(); l++){
-            if (l < surface.Count()-1){
-                Point2D first = surface.ElementAt(l);
-                Point2D second = surface.ElementAt(l+1);
-                if (first.Y == second.Y){
-                    Surfacespace landingspace = new Surfacespace(first, second);
-                    landingspaces.Add(landingspace);
-                }
-            }
-        }
-        return landingspaces;
-    }
-    static bool slowdown_left_to_right = false;
-    static bool slowdown_right_to_left = false;
-    static SpaceshipAction CalcNextAction(Spaceship spaceship, Surfacespace landingspace){
-        var G = 3.711; // m/s^2  
-        var A = 21.9; // angle
-        var H = Math.Abs(Math.Sin(90-A)*G);
-        var landingroom = Math.Abs(landingspace.Start.X - landingspace.End.X);
-        var height_reduction = Math.Abs(spaceship.Y - landingspace.Start.Y);
-        
-        //cos λ = G / Pmax (to get vertical part of split vector)
-        //λ = acos (G / Pmax)
-        //λ = acos(3.711 / 4) = acos(0.9275) = 21.9
-        
-        Console.Error.WriteLine($"G={G}, A={A}, H={H}");
-        
-        SpaceshipAction command = new SpaceshipAction(0,0);
-        //Position Ship with stable angle
-        if (spaceship.Y <= landingspace.Start.Y+25 && spaceship.X > landingspace.Start.X && spaceship.X < landingspace.End.X){
-            command.Rotate = 0;
-            if (spaceship.VSpeed <= -40){
-                command.Power = 4;
-                command.Rotate = 0;
-            }
-            else {
-                command.Power = 3; 
-                command.Rotate = 0;
-            }
-            Console.Error.WriteLine($"Command 0 - Try to land vertically (possible fail)");
-        } else if (spaceship.X < landingspace.Start.X){
-            var distance_to_landingspace = Math.Abs(landingspace.Start.X - spaceship.X);
-            var reduction_time = Math.Abs(spaceship.HSpeed) >= 0 ? Math.Abs(spaceship.HSpeed)/H : 0;
-            var distance_reduction = (int)reduction_time*spaceship.HSpeed;
-            Console.Error.WriteLine($"ReductionDistance={distance_reduction}, Distance2Middle={distance_to_landingspace}");
-            if (  (distance_reduction > distance_to_landingspace || slowdown_left_to_right) && distance_to_landingspace >0 && spaceship.HSpeed > 0 ){
-                slowdown_left_to_right = true;
-                if (distance_reduction > landingroom*1.4 && height_reduction > 2000){
-                   command.Rotate = +(int)(A*2);
-                   Console.Error.WriteLine($"Command 1.5 - Slowing Spaceship down ---->>");
-                } else {
-                    command.Rotate = +(int)A;
-                }
-                command.Power  = 4;    
-                 Console.Error.WriteLine($"Command 1 - Slowing Spaceship down ---->>");
-            }  else {
-                command.Rotate = -(int)A;
-                command.Power  = 4;    
-                Console.Error.WriteLine($"Command 2 - Move towards landingspace ---->>");
-            }
-        } else if (spaceship.X > landingspace.End.X){
-            var distance_to_landingspace = Math.Abs(spaceship.X- landingspace.End.X);
-            var reduction_time = Math.Abs(spaceship.HSpeed) >= 0 ? Math.Abs(spaceship.HSpeed)/H : 0;
-            var distance_reduction = (int)reduction_time*Math.Abs(spaceship.HSpeed);
-            Console.Error.WriteLine($"ReductionDistance={distance_reduction}, Distance2Middle={distance_to_landingspace}");
-            if ( (distance_reduction > distance_to_landingspace || slowdown_right_to_left) && distance_to_landingspace >0 && spaceship.HSpeed < 0){
-                 slowdown_right_to_left = true;
+    private const double MARS_GRAVITY = 3.711;   // Gravitational acceleration on Mars (m/s²).
+    private const double MAX_HORIZONTAL_SPEED = 20.0;    // Maximum safe horizontal speed for landing (m/s).
+    private const double MAX_VERTICAL_SPEED = 40.0;    // Maximum safe vertical speed for landing (m/s).
+    private const double MAX_THRUST_ACCELERATION = 4.0;     // Maximum upward acceleration from the thruster (m/s²).
 
-                if (distance_reduction > landingroom*1.4 && height_reduction > 2000 ){
-                   command.Rotate = -(int)(A*2);
-                   Console.Error.WriteLine($"Command 3.5 - Slowing Spaceship down <<----");
-                } else {
-                    command.Rotate = -(int)A;
-                }
-                
-                
-                command.Power  = 4;    
-                Console.Error.WriteLine($"Command 3 - Slowing Spaceship down <<----");
-            }  else {
-                command.Rotate = +(int)A;
-                command.Power  = 4;
-                Console.Error.WriteLine($"Command 4 - Move towards landingspace <<----");
-            }
-        } else {
-            slowdown_left_to_right = false;
-            slowdown_right_to_left = false;
-            if (spaceship.HSpeed >= 2 || spaceship.HSpeed <= -2) {
-                if (spaceship.HSpeed > 0) {
-                    command.Rotate = +(int)A;
-                    command.Power  = 4;
-                } else {
-                   command.Rotate = -(int)A;
-                   command.Power  = 4;
-                }
-                Console.Error.WriteLine($"Command 5 - Reduce speed to zero");
-            } else {
-                if (spaceship.VSpeed <= -40){
-                    command.Power = 4;
-                    command.Rotate = 0;
-                }
-                else {
-                    command.Power = 3; 
-                    command.Rotate = 0;
-                }
-                Console.Error.WriteLine($"Command 6 - Land vertically");
-            }
-        }
-        return command;
-    }
-    
-    static void Main(string[] args)
+    private const double HORIZONTAL_RESPONSE_RATIO = 0.085; // A factor determining the "softness" of horizontal corrections.
+    private const double REFERENCE_VERTICAL_ACCELERATION = 1.8 * MARS_GRAVITY; // The nominal "g-force" for vertical braking.
+    private const double SHARED_AMPLIFIER_DENOMINATOR = REFERENCE_VERTICAL_ACCELERATION * HORIZONTAL_RESPONSE_RATIO;
+
+    private const double POSITIONAL_REFERENCE_DISTANCE = 185.0; // The reference distance (m) for the P-controller.
+    private const double POSITIONAL_BASE_TILT_DEGREES = 2.8;   // The base tilt (°) applied at the reference distance.
+    private const double POSITIONAL_P_GAIN = POSITIONAL_BASE_TILT_DEGREES / POSITIONAL_REFERENCE_DISTANCE;
+    private const double POSITIONAL_GAIN_AMPLIFIER = 1.0 / SHARED_AMPLIFIER_DENOMINATOR;
+
+    private const double DERIVATIVE_REFERENCE_SPEED = 24.7;  // The reference speed (m/s) for the D-controller.
+    private const double DERIVATIVE_BASE_TILT_DEGREES = 8.2;   // The base tilt (°) applied at the reference speed.
+    private const double DERIVATIVE_D_GAIN = DERIVATIVE_BASE_TILT_DEGREES / DERIVATIVE_REFERENCE_SPEED;
+    private const double DERIVATIVE_GAIN_AMPLIFIER = 1.0 / SHARED_AMPLIFIER_DENOMINATOR;
+
+    private const double VERTICAL_TIMESCALE_TUNING_FACTOR = 1.35;  // A tuning multiplier for the vertical speed correction time.
+    private const double VERTICAL_CORRECTION_TIMESCALE = (MAX_VERTICAL_SPEED / REFERENCE_VERTICAL_ACCELERATION) * VERTICAL_TIMESCALE_TUNING_FACTOR;
+    private const double HORIZONTAL_TIMESCALE_TUNING_FACTOR = 3.3;   // A tuning multiplier for the horizontal speed correction time.
+    private const double HORIZONTAL_CORRECTION_TIMESCALE = (MAX_HORIZONTAL_SPEED / MAX_THRUST_ACCELERATION) * HORIZONTAL_TIMESCALE_TUNING_FACTOR;
+
+    private const double HORIZONTAL_BRAKING_DEAD_ZONE_RATIO = 0.39;  // A ratio of max horizontal speed below which braking is ignored.
+    private static double HORIZONTAL_BRAKING_SPEED_THRESHOLD = MAX_HORIZONTAL_SPEED * HORIZONTAL_BRAKING_DEAD_ZONE_RATIO;
+    private const double FINAL_APPROACH_TIME_SECONDS = 1.9;  // The time (s) from touchdown when the final landing flare begins.
+    private static double ALTITUDE_THRESHOLD_FOR_FINAL_APPROACH = MAX_VERTICAL_SPEED * FINAL_APPROACH_TIME_SECONDS;
+
+    private const double ENGINE_CUTOFF_VERTICAL_SPEED_RATIO = 0.75;  // Ratio of max vertical speed to determine when to cut engines.
+    private const double TARGET_LANDING_VERTICAL_SPEED_RATIO = 0.965; // Ratio of max vertical speed for the ideal touchdown speed.
+    private static double TARGET_LANDING_VERTICAL_SPEED = MAX_VERTICAL_SPEED * TARGET_LANDING_VERTICAL_SPEED_RATIO;
+    private static double ENGINE_CUTOFF_VERTICAL_SPEED = -(MAX_VERTICAL_SPEED * ENGINE_CUTOFF_VERTICAL_SPEED_RATIO);
+    private static double ENGINE_CUTOFF_ALTITUDE = (TARGET_LANDING_VERTICAL_SPEED * TARGET_LANDING_VERTICAL_SPEED - ENGINE_CUTOFF_VERTICAL_SPEED * ENGINE_CUTOFF_VERTICAL_SPEED) / (2 * MARS_GRAVITY);
+
+    private const double PANIC_MANEUVER_TIME_SECONDS = 60.0;    // The time window used to calculate the panic envelope.
+    private static double CRITICAL_HORIZONTAL_DISTANCE = MAX_HORIZONTAL_SPEED * PANIC_MANEUVER_TIME_SECONDS;
+    private static double NET_UPWARD_ACCELERATION = MAX_THRUST_ACCELERATION - MARS_GRAVITY;
+    private static double CRITICAL_ALTITUDE_BUFFER = Math.Abs((-MAX_VERTICAL_SPEED * PANIC_MANEUVER_TIME_SECONDS) + 0.5 * NET_UPWARD_ACCELERATION * PANIC_MANEUVER_TIME_SECONDS * PANIC_MANEUVER_TIME_SECONDS);
+
+    private static int ALTITUDE_THRESHOLD_FOR_FINAL_APPROACH_INT = (int)ALTITUDE_THRESHOLD_FOR_FINAL_APPROACH;
+    private static int ENGINE_CUTOFF_ALTITUDE_INT = (int)ENGINE_CUTOFF_ALTITUDE;
+    private static int ENGINE_CUTOFF_VERTICAL_SPEED_INT = (int)ENGINE_CUTOFF_VERTICAL_SPEED;
+    private static int CRITICAL_HORIZONTAL_DISTANCE_INT = (int)CRITICAL_HORIZONTAL_DISTANCE;
+    private static int CRITICAL_ALTITUDE_BUFFER_INT = (int)CRITICAL_ALTITUDE_BUFFER;
+
+    private static int _landingPadLeftX, _landingPadRightX, _landingPadY;
+    private static int _desiredRotation;
+
+    public static void Main()
     {
-        
-        var surface = ReadSurface();
-        var landingspaces = FindLandingSpaces(surface);
-        var marslander = new Spaceship();
-        
-        // game loop
+        int n = int.Parse(Console.ReadLine());
+        var surface = new Point[n];
+        for (int i = 0; i < n; i++)
+        {
+            var s = Console.ReadLine().Split(' ');
+            surface[i] = new Point(int.Parse(s[0]), int.Parse(s[1]));
+        }
+        var pad = FindLandingPad(surface);
+        _landingPadLeftX = pad[0].X; _landingPadRightX = pad[1].X; _landingPadY = pad[0].Y;
+
         while (true)
         {
-            marslander.ReadInputs();
-            
-            if (landingspaces.Count() > 0){
-                Console.Error.WriteLine($"{landingspaces.Count() } LANDINGSPACES FOUND! ");
-                var land = landingspaces.First();
-                Console.Error.WriteLine($"LAND => {land.Start?.X}, {land.End?.X}");
-                var action = CalcNextAction(marslander,land);
-                Console.WriteLine($"{action.Rotate} {action.Power} "); //Rotate Power
-            } else {
-                Console.WriteLine("0 4"); //Rotate Power
-            }
-        
-            
+            var d = Console.ReadLine().Split(' ');
+            int x = int.Parse(d[0]), y = int.Parse(d[1]),
+                hSpeed = int.Parse(d[2]), vSpeed = int.Parse(d[3]),
+                rotation = int.Parse(d[5]);
+
+            CalculateNextMove(x, y, hSpeed, vSpeed, rotation);
         }
+    }
+
+    private static void CalculateNextMove(int x, int y, int hSpeed, int vSpeed, int rotation)
+    {
+        _desiredRotation = GetDesiredRotation(x, y, hSpeed);
+        int desiredThrust = GetDesiredThrust(x, y, hSpeed, vSpeed, rotation);
+        Console.WriteLine($"{_desiredRotation} {desiredThrust}");
+    }
+
+    private static int GetDesiredRotation(int x, int y, int hSpeed)
+    {
+        if (IsInPanicState(x, y) && hSpeed != 0) return 0;
+
+        int pTerm = CalculatePositionalAngle(GetHorizontalDistanceFromPad(x));
+        int dTerm = CalculateBrakingAngle(hSpeed, y);
+        return Math.Clamp(pTerm + dTerm, -90, 90);
+    }
+
+    private static int CalculatePositionalAngle(int distance)
+    {
+        double angle = distance * POSITIONAL_P_GAIN;
+        return (int)Math.Round(angle + angle * POSITIONAL_GAIN_AMPLIFIER);
+    }
+
+    private static int CalculateBrakingAngle(int hSpeed, int y)
+    {
+        if (Math.Abs(hSpeed) <= HORIZONTAL_BRAKING_SPEED_THRESHOLD || y <= _landingPadY + ALTITUDE_THRESHOLD_FOR_FINAL_APPROACH_INT) return 0;
+
+        double angle = hSpeed * DERIVATIVE_D_GAIN;
+        return (int)Math.Round(angle + angle * DERIVATIVE_GAIN_AMPLIFIER);
+    }
+
+    private static int GetDesiredThrust(int x, int y, int hSpeed, int vSpeed, int rotation)
+    {
+        if (IsInPanicState(x, y) && vSpeed < -1) return 4;
+        if (ShouldCutoffForTouchdown(x, y, vSpeed)) return 0;
+
+        int horizontalThrust = CalculateHorizontalThrustComponent(hSpeed, rotation);
+        int verticalThrust = CalculateVerticalThrustComponent(vSpeed);
+        return Math.Min(horizontalThrust + verticalThrust, 4);
+    }
+
+    private static int CalculateHorizontalThrustComponent(int hSpeed, int rotation)
+    {
+        bool isBraking = (rotation < 0 && hSpeed < 0) || (rotation > 0 && hSpeed > 0);
+        return isBraking ? Math.Abs((int)Math.Round(hSpeed / HORIZONTAL_CORRECTION_TIMESCALE)) : 0;
+    }
+
+    private static int CalculateVerticalThrustComponent(int vSpeed)
+    {
+        return -(int)Math.Round(vSpeed / VERTICAL_CORRECTION_TIMESCALE);
+    }
+
+    private static bool ShouldCutoffForTouchdown(int x, int y, int vSpeed)
+        => GetHorizontalDistanceFromPad(x) == 0 && _desiredRotation == 0 &&
+           y - _landingPadY < ENGINE_CUTOFF_ALTITUDE_INT && vSpeed > ENGINE_CUTOFF_VERTICAL_SPEED_INT;
+
+    private static bool IsInPanicState(int x, int y)
+        => (y - _landingPadY) < CRITICAL_ALTITUDE_BUFFER_INT && Math.Abs(GetHorizontalDistanceFromPad(x)) > CRITICAL_HORIZONTAL_DISTANCE_INT;
+
+    private static int GetHorizontalDistanceFromPad(int x)
+    {
+        if (x < _landingPadLeftX) return x - _landingPadLeftX;
+        if (x > _landingPadRightX) return x - _landingPadRightX;
+        return 0;
+    }
+
+    private static Point[] FindLandingPad(IReadOnlyList<Point> surface)
+    {
+        for (int i = 0; i < surface.Count - 1; ++i)
+            if (surface[i].Y == surface[i + 1].Y) return new[] { surface[i], surface[i + 1] };
+        throw new InvalidOperationException("Landing pad not found in surface data.");
     }
 }

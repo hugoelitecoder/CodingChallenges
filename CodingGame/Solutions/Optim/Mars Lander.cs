@@ -442,8 +442,8 @@ public class MarsLanderSolution : Individual
     }
     public StaticMove CreateRandomMove(StaticMove move = null)
     {
-        if (move == null) return new StaticMove(_rand.Next(-15, 16), _rand.Next(-1, 2));
-        move.Rotation = _rand.Next(-15, 16);
+        if (move == null) return new StaticMove(_rand.Next(-23, 23), _rand.Next(-1, 2));
+        move.Rotation = _rand.Next(-23, 23);
         move.Power = _rand.Next(-1, 2);
         return move;
     }

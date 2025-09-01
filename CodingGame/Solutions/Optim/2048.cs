@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Text;
 
 public class Solution
 {
@@ -39,7 +40,8 @@ public class Solution
             Board = initialBoard,
             Score = initialScore,
             Seed = initialSeed,
-            Path = "",
+            Parent = null,
+            Move = '\0',
             HeuristicScore = Heuristics.Evaluate(initialBoard, initialScore)
         };
         var beam = new List<SearchNode> { initialNode };
@@ -53,24 +55,24 @@ public class Solution
                 {
                     var (newBoard, scoreGained, moved) = BoardUtils.Move(node.Board, dir);
                     if (!moved) continue;
-                    var currentSeed = node.Seed;
-                    var newPath = node.Path + "UDLR"[dir];
+
                     var newScore = node.Score + scoreGained;
-                    var emptyCellIndices = BoardUtils.GetEmptyCellIndices(newBoard);
-                    if (emptyCellIndices.Count > 0)
+                    int emptyCellCount = BoardUtils.CountEmptyCells(newBoard);
+
+                    if (emptyCellCount > 0)
                     {
-                        var spawnListIndex = (int)(currentSeed % (ulong)emptyCellIndices.Count);
-                        var cellBoardIndex = emptyCellIndices[spawnListIndex];
-                        var spawnPower = (currentSeed & 0x10) == 0 ? 1 : 2;
+                        var spawnListIndex = (int)(node.Seed % (ulong)emptyCellCount);
+                        var cellBoardIndex = BoardUtils.GetNthEmptyCellIndex(newBoard, spawnListIndex);
+                        var spawnPower = (node.Seed & 0x10) == 0 ? 1 : 2;
                         var spawnedBoard = newBoard | ((ulong)spawnPower << (cellBoardIndex * 4));
-                        var nextSeed = (currentSeed * currentSeed) % PrngMod;
+                        var nextSeed = (node.Seed * node.Seed) % PrngMod;
                         var heuristic = Heuristics.Evaluate(spawnedBoard, newScore);
-                        nextBeamCandidates.Enqueue(new SearchNode { Board = spawnedBoard, Score = newScore, Seed = nextSeed, Path = newPath, HeuristicScore = heuristic }, -heuristic);
+                        nextBeamCandidates.Enqueue(new SearchNode { Board = spawnedBoard, Score = newScore, Seed = nextSeed, Parent = node, Move = "UDLR"[dir], HeuristicScore = heuristic }, -heuristic);
                     }
                     else
                     {
                         var heuristic = Heuristics.Evaluate(newBoard, newScore);
-                        nextBeamCandidates.Enqueue(new SearchNode { Board = newBoard, Score = newScore, Seed = currentSeed, Path = newPath, HeuristicScore = heuristic }, -heuristic);
+                        nextBeamCandidates.Enqueue(new SearchNode { Board = newBoard, Score = newScore, Seed = node.Seed, Parent = node, Move = "UDLR"[dir], HeuristicScore = heuristic }, -heuristic);
                     }
                 }
             }
@@ -82,11 +84,29 @@ public class Solution
                 beam.Add(nextBeamCandidates.Dequeue());
             }
         }
+
         if (beam.Count > 0)
         {
-            var bestNode = beam.OrderByDescending(n => n.HeuristicScore).First();
+            var bestNode = beam[0];
+            for (int i = 1; i < beam.Count; i++)
+            {
+                if (beam[i].HeuristicScore > bestNode.HeuristicScore)
+                {
+                    bestNode = beam[i];
+                }
+            }
+
             PrintDebugBoard(new[] { bestNode }, "Best candidate found:");
-            return bestNode.Path;
+
+            var pathChars = new List<char>(SearchDepth);
+            var current = bestNode;
+            while (current.Parent != null)
+            {
+                pathChars.Add(current.Move);
+                current = current.Parent;
+            }
+            pathChars.Reverse();
+            return new string(pathChars.ToArray());
         }
         return "U";
     }
@@ -118,7 +138,15 @@ public class Solution
         Console.Error.WriteLine($"[DEBUG] {message}");
         foreach (var node in nodes)
         {
-            Console.Error.WriteLine($"[DEBUG] Path: {node.Path}, H: {node.HeuristicScore:F2}, S: {node.Score}");
+            var pathBuilder = new StringBuilder();
+            var current = node;
+            while (current != null && current.Move != '\0')
+            {
+                pathBuilder.Insert(0, current.Move);
+                current = current.Parent;
+            }
+
+            Console.Error.WriteLine($"[DEBUG] Path: {pathBuilder}, H: {node.HeuristicScore:F2}, S: {node.Score}");
             for (var r = 0; r < GridSize; r++)
             {
                 var line = "";
@@ -144,7 +172,8 @@ public class SearchNode
     public ulong Board;
     public int Score;
     public ulong Seed;
-    public string Path;
+    public SearchNode Parent;
+    public char Move;
     public double HeuristicScore;
 }
 
@@ -208,17 +237,38 @@ public static class BoardUtils
 
     public static int GetTile(ulong board, int r, int c) => (int)((board >> ((r * GridSize + c) * 4)) & 0xF);
 
-    public static List<int> GetEmptyCellIndices(ulong board)
+    public static int CountEmptyCells(ulong board)
     {
-        var indices = new List<int>(16);
+        int count = 0;
         for (var i = 0; i < GridSize * GridSize; i++)
         {
             if (((board >> (i * 4)) & 0xF) == 0)
             {
-                indices.Add(i);
+                count++;
             }
         }
-        return indices;
+        return count;
+    }
+
+    public static int GetNthEmptyCellIndex(ulong board, int n)
+    {
+        int seen = 0;
+        for (var c = 0; c < GridSize; c++)
+        {
+            for (var r = 0; r < GridSize; r++)
+            {
+                var index = r * GridSize + c;
+                if (((board >> (index * 4)) & 0xF) == 0)
+                {
+                    if (seen == n)
+                    {
+                        return index;
+                    }
+                    seen++;
+                }
+            }
+        }
+        return -1;
     }
 
     private static ushort ReverseRow(ushort row) => (ushort)(((row & 0xF000) >> 12) | ((row & 0x0F00) >> 4) | ((row & 0x00F0) << 4) | ((row & 0x000F) << 12));
@@ -297,17 +347,17 @@ public static class Heuristics
     private static readonly double MaxTileWeight = 1.0;
     private static readonly double ScoreWeight = 0.5;
     private static readonly double[] MonotonicityGridPenalty = { 10, 8, 7, 6.5, 5, 4, 3.5, 3, -0.5, -1.5, -2, -2.5, -4, -5, -6, -7 };
+    private static readonly int[] _tiles = new int[16];
 
     public static double Evaluate(ulong board, int score)
     {
-        var tiles = new int[16];
         var emptyCells = 0;
         var maxTile = 0;
         for (var i = 0; i < 16; i++)
         {
-            tiles[i] = (int)((board >> (i * 4)) & 0xF);
-            if (tiles[i] == 0) emptyCells++;
-            if (tiles[i] > maxTile) maxTile = tiles[i];
+            _tiles[i] = (int)((board >> (i * 4)) & 0xF);
+            if (_tiles[i] == 0) emptyCells++;
+            if (_tiles[i] > maxTile) maxTile = _tiles[i];
         }
         double monoScore1 = 0, monoScore2 = 0, monoScore3 = 0, monoScore4 = 0;
         double smoothScore = 0;
@@ -316,21 +366,21 @@ public static class Heuristics
             for (var c = 0; c < GridSize; c++)
             {
                 var idx = r * GridSize + c;
-                monoScore1 += MonotonicityGridPenalty[idx] * tiles[idx];
-                monoScore2 += MonotonicityGridPenalty[idx] * tiles[15 - idx];
-                monoScore3 += MonotonicityGridPenalty[idx] * tiles[r * GridSize + (3 - c)];
-                monoScore4 += MonotonicityGridPenalty[idx] * tiles[(3 - r) * GridSize + c];
-                var tilePower = tiles[idx];
+                monoScore1 += MonotonicityGridPenalty[idx] * _tiles[idx];
+                monoScore2 += MonotonicityGridPenalty[idx] * _tiles[15 - idx];
+                monoScore3 += MonotonicityGridPenalty[idx] * _tiles[r * GridSize + (3 - c)];
+                monoScore4 += MonotonicityGridPenalty[idx] * _tiles[(3 - r) * GridSize + c];
+                var tilePower = _tiles[idx];
                 if (tilePower > 0)
                 {
                     if (c < GridSize - 1)
                     {
-                        var rightPower = tiles[idx + 1];
+                        var rightPower = _tiles[idx + 1];
                         if (rightPower > 0) smoothScore -= Math.Abs(tilePower - rightPower);
                     }
                     if (r < GridSize - 1)
                     {
-                        var downPower = tiles[idx + 4];
+                        var downPower = _tiles[idx + 4];
                         if (downPower > 0) smoothScore -= Math.Abs(tilePower - downPower);
                     }
                 }

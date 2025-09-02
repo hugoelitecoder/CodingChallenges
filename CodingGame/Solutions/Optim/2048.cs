@@ -1,396 +1,232 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.Linq;
-using System.Text;
 
 public class Solution
 {
-    private const int GridSize = 4;
-    private const int BeamWidth = 80;
-    private const int SearchDepth = 8;
-    private const ulong PrngMod = 50515093UL;
-    private static readonly Dictionary<int, int> _log2Lookup = new Dictionary<int, int>();
+    const int BOARD_SIZE = 4;
+    static readonly int[,] BLANK_GRID = new int[BOARD_SIZE, BOARD_SIZE];
+    const int BEAM_WIDTH = 40;
+    const int FIRST_TURN_BEAM_WIDTH = 50;
+    static readonly char[] POSSIBLE_MOVE = { 'U', 'D', 'L', 'R' };
+    static readonly double[] POIDS = { 97.30119, 90.68706, 13.228226, 67.991486, 12.232829 };
+    const int MAX_DEPTH = 60;
+    const int FIRST_TURN_MAX_DEPTH = 1500;
+    const double SAFE_PATH = 1.5;
+
+    static bool firstTurn = true;
 
     public static void Main(string[] args)
     {
-        MoveTables.Init();
-        for (var i = 1; i <= 17; i++)
-        {
-            _log2Lookup[1 << i] = i;
-        }
         while (true)
         {
-            var sw = Stopwatch.StartNew();
-            var (seed, score, initialBoard) = ReadTurnInput();
-            var debugBoard = new ulong[1];
-            debugBoard[0] = initialBoard;
-            PrintDebugBoard(debugBoard, "Input board:");
-            var bestSequence = FindBestMoveSequence(initialBoard, score, seed);
-            sw.Stop();
-            Console.Error.WriteLine($"[DEBUG] Turn took {sw.ElapsedMilliseconds}ms. Chosen sequence: {bestSequence}");
-            Console.WriteLine(bestSequence);
+            var seedLine = Console.ReadLine();
+            if (seedLine == null) return;
+            var seed = long.Parse(seedLine);
+            var score = int.Parse(Console.ReadLine());
+            var grid = new int[BOARD_SIZE, BOARD_SIZE];
+            for (var i = 0; i < BOARD_SIZE; i++)
+            {
+                var inputs = Console.ReadLine().Split(' ');
+                for (var j = 0; j < BOARD_SIZE; j++) grid[i, j] = int.Parse(inputs[j]);
+            }
+            var m = BestMove(grid, seed);
+            firstTurn = false;
+            Console.WriteLine(m);
         }
     }
 
-    public static string FindBestMoveSequence(ulong initialBoard, int initialScore, ulong initialSeed)
+    class TreeGrid
     {
-        var initialNode = new SearchNode
+        public int[,] grid;
+        public long seed;
+        public int score;
+        public int depth;
+        public string path;
+        public int margedCell;
+        public int biggestCell;
+        public double heuristique;
+        public TreeGrid(int[,] grid, long seed, int score, int depth, string path, int margedCell, int biggestCell)
         {
-            Board = initialBoard,
-            Score = initialScore,
-            Seed = initialSeed,
-            Parent = null,
-            Move = '\0',
-            HeuristicScore = Heuristics.Evaluate(initialBoard, initialScore)
-        };
-        var beam = new List<SearchNode> { initialNode };
-        var nextBeamCandidates = new PriorityQueue<SearchNode, double>();
-        for (var d = 0; d < SearchDepth; d++)
+            this.grid = grid;
+            this.seed = seed;
+            this.score = score;
+            this.depth = depth;
+            this.path = path;
+            this.margedCell = margedCell;
+            this.biggestCell = biggestCell;
+            this.heuristique = Heuristique(this);
+        }
+    }
+
+    static string BestMove(int[,] grid, long seed)
+    {
+        var nodes = new List<TreeGrid> { new TreeGrid(Clone(grid), seed, 0, 0, "", 0, 0) };
+        var maxDepth = firstTurn ? FIRST_TURN_MAX_DEPTH : MAX_DEPTH;
+        while (nodes[0].depth != maxDepth)
         {
-            nextBeamCandidates.Clear();
-            foreach (var node in beam)
+            var next = new List<TreeGrid>();
+            var n = firstTurn ? FIRST_TURN_BEAM_WIDTH : BEAM_WIDTH;
+            var take = Math.Min(nodes.Count, n);
+            for (var i = 0; i < take; i++)
             {
-                for (var dir = 0; dir < 4; dir++)
+                var node = nodes[i];
+                for (var iMove = 0; iMove < 4; iMove++)
                 {
-                    var (newBoard, scoreGained, moved) = BoardUtils.Move(node.Board, dir);
-                    if (!moved) continue;
-
-                    var newScore = node.Score + scoreGained;
-                    int emptyCellCount = BoardUtils.CountEmptyCells(newBoard);
-
-                    if (emptyCellCount > 0)
+                    var res = Move(node.grid, POSSIBLE_MOVE[iMove]);
+                    var _grid = res.grid;
+                    var gained = res.score;
+                    var isSameGrid = res.isSameGrid;
+                    var merged = res.margedCell;
+                    var biggest = res.biggestCell;
+                    if (!isSameGrid)
                     {
-                        var spawnListIndex = (int)(node.Seed % (ulong)emptyCellCount);
-                        var cellBoardIndex = BoardUtils.GetNthEmptyCellIndex(newBoard, spawnListIndex);
-                        var spawnPower = (node.Seed & 0x10) == 0 ? 1 : 2;
-                        var spawnedBoard = newBoard | ((ulong)spawnPower << (cellBoardIndex * 4));
-                        var nextSeed = (node.Seed * node.Seed) % PrngMod;
-                        var heuristic = Heuristics.Evaluate(spawnedBoard, newScore);
-                        nextBeamCandidates.Enqueue(new SearchNode { Board = spawnedBoard, Score = newScore, Seed = nextSeed, Parent = node, Move = "UDLR"[dir], HeuristicScore = heuristic }, -heuristic);
-                    }
-                    else
-                    {
-                        var heuristic = Heuristics.Evaluate(newBoard, newScore);
-                        nextBeamCandidates.Enqueue(new SearchNode { Board = newBoard, Score = newScore, Seed = node.Seed, Parent = node, Move = "UDLR"[dir], HeuristicScore = heuristic }, -heuristic);
+                        var preshot = PreshotSpawn(_grid, node.seed);
+                        if (!double.IsNaN(preshot.x) && !double.IsNaN(preshot.y))
+                        {
+                            _grid[(int)preshot.x, (int)preshot.y] = preshot.value;
+                        }
+                        var path = node.path + POSSIBLE_MOVE[iMove];
+                        var child = new TreeGrid(_grid, preshot.seed, gained, node.depth + 1, path, merged, biggest);
+                        next.Add(child);
                     }
                 }
             }
-            if (nextBeamCandidates.Count == 0) break;
-            beam.Clear();
-            var count = Math.Min(BeamWidth, nextBeamCandidates.Count);
-            for (var i = 0; i < count; i++)
+            if (next.Count == 0)
             {
-                beam.Add(nextBeamCandidates.Dequeue());
-            }
-        }
-
-        if (beam.Count > 0)
-        {
-            var bestNode = beam[0];
-            for (int i = 1; i < beam.Count; i++)
-            {
-                if (beam[i].HeuristicScore > bestNode.HeuristicScore)
-                {
-                    bestNode = beam[i];
-                }
-            }
-
-            PrintDebugBoard(new[] { bestNode }, "Best candidate found:");
-
-            var pathChars = new List<char>(SearchDepth);
-            var current = bestNode;
-            while (current.Parent != null)
-            {
-                pathChars.Add(current.Move);
-                current = current.Parent;
-            }
-            pathChars.Reverse();
-            return new string(pathChars.ToArray());
-        }
-        return "U";
-    }
-
-    private static (ulong seed, int score, ulong board) ReadTurnInput()
-    {
-        var seed = ulong.Parse(Console.ReadLine());
-        var score = int.Parse(Console.ReadLine());
-        ulong board = 0;
-        for (var r = 0; r < GridSize; r++)
-        {
-            var inputs = Console.ReadLine().Split(' ');
-            for (var c = 0; c < GridSize; c++)
-            {
-                var val = int.Parse(inputs[c]);
-                if (val > 0)
-                {
-                    var power = _log2Lookup[val];
-                    var index = r * GridSize + c;
-                    board |= (ulong)power << (index * 4);
-                }
-            }
-        }
-        return (seed, score, board);
-    }
-
-    private static void PrintDebugBoard(IEnumerable<SearchNode> nodes, string message)
-    {
-        Console.Error.WriteLine($"[DEBUG] {message}");
-        foreach (var node in nodes)
-        {
-            var pathBuilder = new StringBuilder();
-            var current = node;
-            while (current != null && current.Move != '\0')
-            {
-                pathBuilder.Insert(0, current.Move);
-                current = current.Parent;
-            }
-
-            Console.Error.WriteLine($"[DEBUG] Path: {pathBuilder}, H: {node.HeuristicScore:F2}, S: {node.Score}");
-            for (var r = 0; r < GridSize; r++)
-            {
-                var line = "";
-                for (var c = 0; c < GridSize; c++)
-                {
-                    var p = BoardUtils.GetTile(node.Board, r, c);
-                    line += (p == 0 ? "." : (1 << p).ToString()).PadLeft(5);
-                }
-                Console.Error.WriteLine($"[DEBUG] {line}");
-            }
-        }
-    }
-
-    private static void PrintDebugBoard(IEnumerable<ulong> boards, string message)
-    {
-        var nodes = boards.Select(b => new SearchNode { Board = b });
-        PrintDebugBoard(nodes, message);
-    }
-}
-
-public class SearchNode
-{
-    public ulong Board;
-    public int Score;
-    public ulong Seed;
-    public SearchNode Parent;
-    public char Move;
-    public double HeuristicScore;
-}
-
-public static class BoardUtils
-{
-    private const int GridSize = 4;
-    public static (ulong, int, bool) Move(ulong board, int direction)
-    {
-        ulong newBoard;
-        int scoreGained;
-        switch (direction)
-        {
-            case 0: // Up
-                var transposedUp = Transpose(board);
-                (newBoard, scoreGained) = MoveLeft(transposedUp);
-                newBoard = Transpose(newBoard);
+                if (nodes[0].path == "") nodes[0].path = "U";
                 break;
-            case 1: // Down
-                var transposedDown = Transpose(board);
-                (newBoard, scoreGained) = MoveRight(transposedDown);
-                newBoard = Transpose(newBoard);
-                break;
-            case 2: // Left
-                (newBoard, scoreGained) = MoveLeft(board);
-                break;
-            default: // Right
-                (newBoard, scoreGained) = MoveRight(board);
-                break;
-        }
-        return (newBoard, scoreGained, newBoard != board);
-    }
-
-    private static (ulong, int) MoveLeft(ulong board)
-    {
-        ulong newBoard = 0;
-        var totalScore = 0;
-        for (var i = 0; i < GridSize; i++)
-        {
-            var row = (ushort)((board >> (i * 16)) & 0xFFFF);
-            var (newRow, score) = MoveTables.GetLeftMove(row);
-            newBoard |= (ulong)newRow << (i * 16);
-            totalScore += score;
-        }
-        return (newBoard, totalScore);
-    }
-
-    private static (ulong, int) MoveRight(ulong board)
-    {
-        ulong newBoard = 0;
-        var totalScore = 0;
-        for (var i = 0; i < GridSize; i++)
-        {
-            var row = (ushort)((board >> (i * 16)) & 0xFFFF);
-            var reversedRow = ReverseRow(row);
-            var (movedReversedRow, score) = MoveTables.GetLeftMove(reversedRow);
-            newBoard |= (ulong)ReverseRow(movedReversedRow) << (i * 16);
-            totalScore += score;
-        }
-        return (newBoard, totalScore);
-    }
-
-    public static int GetTile(ulong board, int r, int c) => (int)((board >> ((r * GridSize + c) * 4)) & 0xF);
-
-    public static int CountEmptyCells(ulong board)
-    {
-        int count = 0;
-        for (var i = 0; i < GridSize * GridSize; i++)
-        {
-            if (((board >> (i * 4)) & 0xF) == 0)
-            {
-                count++;
             }
+            next.Sort((a, b) => b.heuristique.CompareTo(a.heuristique));
+            nodes = next;
         }
-        return count;
+        var pathOut = nodes[0].path;
+        var cut = (int)Math.Round(pathOut.Length / SAFE_PATH);
+        if (cut < 0) cut = 0;
+        if (cut > pathOut.Length) cut = pathOut.Length;
+        return pathOut.Substring(0, cut);
     }
 
-    public static int GetNthEmptyCellIndex(ulong board, int n)
+    static (int[,] grid, int score, bool isSameGrid, int margedCell, int biggestCell) Move(int[,] grid, char m)
     {
-        int seen = 0;
-        for (var c = 0; c < GridSize; c++)
-        {
-            for (var r = 0; r < GridSize; r++)
-            {
-                var index = r * GridSize + c;
-                if (((board >> (index * 4)) & 0xF) == 0)
-                {
-                    if (seen == n)
-                    {
-                        return index;
-                    }
-                    seen++;
-                }
-            }
-        }
-        return -1;
-    }
-
-    private static ushort ReverseRow(ushort row) => (ushort)(((row & 0xF000) >> 12) | ((row & 0x0F00) >> 4) | ((row & 0x00F0) << 4) | ((row & 0x000F) << 12));
-
-    private static ulong Transpose(ulong board)
-    {
-        ulong transposedBoard = 0;
-        for (var r = 0; r < GridSize; r++)
-        {
-            for (var c = 0; c < GridSize; c++)
-            {
-                var tile = (board >> ((r * GridSize + c) * 4)) & 0xF;
-                if (tile != 0)
-                {
-                    transposedBoard |= tile << ((c * GridSize + r) * 4);
-                }
-            }
-        }
-        return transposedBoard;
-    }
-}
-
-public static class MoveTables
-{
-    private const int GridSize = 4;
-    private static (ushort, int)[] _leftMoveLookup;
-
-    public static void Init()
-    {
-        _leftMoveLookup = new (ushort, int)[65536];
-        for (uint i = 0; i < 65536; i++)
-        {
-            _leftMoveLookup[i] = PrecomputeMove((ushort)i);
-        }
-    }
-
-    public static (ushort, int) GetLeftMove(ushort row) => _leftMoveLookup[row];
-
-    private static (ushort, int) PrecomputeMove(ushort row)
-    {
-        var line = new int[GridSize];
-        for (var i = 0; i < GridSize; i++) line[i] = (row >> (i * 4)) & 0xF;
-        var packed = new int[GridSize];
-        var current = 0;
-        for (var i = 0; i < GridSize; i++)
-        {
-            if (line[i] != 0) packed[current++] = line[i];
-        }
+        var sameGrid = true;
+        var _grid = Clone(grid);
         var score = 0;
-        var merged = new int[GridSize];
-        current = 0;
-        for (var i = 0; i < GridSize && packed[i] != 0; i++)
-        {
-            if (i + 1 < GridSize && packed[i] == packed[i + 1])
-            {
-                var val = packed[i] + 1;
-                merged[current] = val;
-                score += 1 << val;
-                i++;
-            }
-            else merged[current] = packed[i];
-            current++;
-        }
-        ushort resultRow = 0;
-        for (var i = 0; i < GridSize; i++) resultRow |= (ushort)(merged[i] << (i * 4));
-        return (resultRow, score);
-    }
-}
+        var margedCell = 0;
+        var biggestCell = 0;
 
-public static class Heuristics
-{
-    private const int GridSize = 4;
-    private static readonly double EmptyWeight = 2.7;
-    private static readonly double MonoWeight = 1.0;
-    private static readonly double SmoothWeight = 0.1;
-    private static readonly double MaxTileWeight = 1.0;
-    private static readonly double ScoreWeight = 0.5;
-    private static readonly double[] MonotonicityGridPenalty = { 10, 8, 7, 6.5, 5, 4, 3.5, 3, -0.5, -1.5, -2, -2.5, -4, -5, -6, -7 };
-    private static readonly int[] _tiles = new int[16];
+        var indexStart = (m == 'U' || m == 'L') ? 0 : BOARD_SIZE - 1;
+        var indexEnd = (m == 'U' || m == 'L') ? BOARD_SIZE - 1 : 0;
+        var indexInc = (m == 'U' || m == 'L') ? 1 : -1;
 
-    public static double Evaluate(ulong board, int score)
-    {
-        var emptyCells = 0;
-        var maxTile = 0;
-        for (var i = 0; i < 16; i++)
+        for (var i = indexStart; i != indexEnd + indexInc; i += indexInc)
         {
-            _tiles[i] = (int)((board >> (i * 4)) & 0xF);
-            if (_tiles[i] == 0) emptyCells++;
-            if (_tiles[i] > maxTile) maxTile = _tiles[i];
-        }
-        double monoScore1 = 0, monoScore2 = 0, monoScore3 = 0, monoScore4 = 0;
-        double smoothScore = 0;
-        for (var r = 0; r < GridSize; r++)
-        {
-            for (var c = 0; c < GridSize; c++)
+            for (var j = indexStart; j != indexEnd + indexInc; j += indexInc)
             {
-                var idx = r * GridSize + c;
-                monoScore1 += MonotonicityGridPenalty[idx] * _tiles[idx];
-                monoScore2 += MonotonicityGridPenalty[idx] * _tiles[15 - idx];
-                monoScore3 += MonotonicityGridPenalty[idx] * _tiles[r * GridSize + (3 - c)];
-                monoScore4 += MonotonicityGridPenalty[idx] * _tiles[(3 - r) * GridSize + c];
-                var tilePower = _tiles[idx];
-                if (tilePower > 0)
+                var index1 = (m == 'U' || m == 'D') ? i : j;
+                var index2 = (m == 'U' || m == 'D') ? j : i;
+                var end = indexEnd + indexInc;
+
+                var k = ((m == 'U' || m == 'D') ? index1 : index2) + indexInc;
+
+                if (_grid[index1, index2] == 0)
                 {
-                    if (c < GridSize - 1)
+                    for (; k != end; k += indexInc)
                     {
-                        var rightPower = _tiles[idx + 1];
-                        if (rightPower > 0) smoothScore -= Math.Abs(tilePower - rightPower);
-                    }
-                    if (r < GridSize - 1)
-                    {
-                        var downPower = _tiles[idx + 4];
-                        if (downPower > 0) smoothScore -= Math.Abs(tilePower - downPower);
+                        var kIndex1 = (m == 'U' || m == 'D') ? k : index1;
+                        var kIndex2 = (m == 'U' || m == 'D') ? index2 : k;
+                        if (_grid[kIndex1, kIndex2] != 0)
+                        {
+                            sameGrid = false;
+                            _grid[index1, index2] = _grid[kIndex1, kIndex2];
+                            _grid[kIndex1, kIndex2] = 0;
+                            break;
+                        }
                     }
                 }
+
+                if (_grid[index1, index2] != 0)
+                {
+                    for (; k != end; k += indexInc)
+                    {
+                        var kIndex1 = (m == 'U' || m == 'D') ? k : index1;
+                        var kIndex2 = (m == 'U' || m == 'D') ? index2 : k;
+                        if (_grid[kIndex1, kIndex2] == _grid[index1, index2])
+                        {
+                            sameGrid = false;
+                            var cellNumber = _grid[index1, index2] * 2;
+                            _grid[index1, index2] = cellNumber;
+                            _grid[kIndex1, kIndex2] = 0;
+                            score += cellNumber;
+                            margedCell++;
+                            break;
+                        }
+                        else if (_grid[kIndex1, kIndex2] != 0)
+                        {
+                            break;
+                        }
+                    }
+                }
+
+                if (_grid[index1, index2] > biggestCell) biggestCell = _grid[index1, index2];
             }
         }
-        var monoScore = Math.Max(Math.Max(monoScore1, monoScore2), Math.Max(monoScore3, monoScore4));
-        return score * ScoreWeight
-               + emptyCells * EmptyWeight
-               + monoScore * MonoWeight
-               + smoothScore * SmoothWeight
-               + maxTile * MaxTileWeight;
+
+        return (_grid, score, sameGrid, margedCell, biggestCell);
+    }
+
+    static (double x, double y, int value, long seed) PreshotSpawn(int[,] grid, long seed)
+    {
+        var free = new List<int>();
+        for (var y = 0; y < BOARD_SIZE; y++)
+        {
+            for (var x = 0; x < BOARD_SIZE; x++)
+            {
+                if (grid[x, y] == 0) free.Add(x + y * BOARD_SIZE);
+            }
+        }
+        if (free.Count == 0) return (double.NaN, double.NaN, 0, seed);
+        var spawnIndex = free[(int)(seed % free.Count)];
+        var value = ((seed & 0x10) == 0) ? 2 : 4;
+        var sx = spawnIndex % BOARD_SIZE;
+        var sy = spawnIndex / BOARD_SIZE;
+        var nextSeed = (seed * seed) % 50515093L;
+        return (sx, sy, value, nextSeed);
+    }
+
+    static double Heuristique(TreeGrid node)
+    {
+        var grid = node.grid;
+        var monotonie = CalculMonotonie(grid);
+        var score = node.score * POIDS[0] + node.margedCell * POIDS[1] + node.biggestCell * POIDS[3];
+        score -= monotonie * POIDS[4];
+        if (grid[0, 0] == node.biggestCell || grid[0, 3] == node.biggestCell || grid[3, 0] == node.biggestCell || grid[3, 3] == node.biggestCell) score *= POIDS[2];
+        return score;
+    }
+
+    static int CalculMonotonie(int[,] grid)
+    {
+        var monotonie = 0;
+        for (var i = 0; i < BOARD_SIZE; i++)
+        {
+            var rowMonotonie = 0;
+            for (var j = 0; j < BOARD_SIZE - 1; j++)
+            {
+                var diff = Math.Abs(grid[i, j] - grid[i, j + 1]);
+                rowMonotonie += diff;
+            }
+            monotonie += rowMonotonie;
+        }
+        return monotonie;
+    }
+
+    static int[,] Clone(int[,] src)
+    {
+        var r = src.GetLength(0);
+        var c = src.GetLength(1);
+        var dst = new int[r, c];
+        for (var i = 0; i < r; i++)
+            for (var j = 0; j < c; j++)
+                dst[i, j] = src[i, j];
+        return dst;
     }
 }

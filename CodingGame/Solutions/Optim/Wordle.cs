@@ -89,7 +89,7 @@ class WordleSolver
     {
         if (turnNumber == 1)
         {
-            return "SALETI";
+            return CalculateFirstGuess(timer, turnDeadlineMs);
         }
 
         if (_candidateIndices.Count <= 2)
@@ -105,6 +105,38 @@ class WordleSolver
         {
             return FindBestGuessMinimax(timer, turnDeadlineMs);
         }
+    }
+
+    private string CalculateFirstGuess(Stopwatch timer, long turnDeadlineMs)
+    {
+        string bestGuess = _allWords[0];
+        int minWorstCase = _allWords.Length;
+
+        for (int i = 0; i < _allWords.Length; i++)
+        {
+            if (timer.ElapsedMilliseconds >= turnDeadlineMs - 20) break;
+
+            var guess = _allWords[i];
+            var feedbackBuckets = new Dictionary<int, int>(256);
+
+            foreach (var secret in _allWords)
+            {
+                int feedback = EncodeFeedbackSimple(guess, secret);
+                if (!feedbackBuckets.TryAdd(feedback, 1))
+                    feedbackBuckets[feedback]++;
+            }
+
+            int currentWorstCase = 0;
+            foreach (var count in feedbackBuckets.Values)
+                if (count > currentWorstCase) currentWorstCase = count;
+
+            if (currentWorstCase < minWorstCase)
+            {
+                minWorstCase = currentWorstCase;
+                bestGuess = guess;
+            }
+        }
+        return bestGuess;
     }
 
     private string FindBestGuessByPositionalHeuristic(Stopwatch timer, long turnDeadlineMs)

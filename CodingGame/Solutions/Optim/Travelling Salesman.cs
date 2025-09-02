@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 
-public class Solution
+public static class Solution
 {
     public static void Main(string[] args)
     {
@@ -19,8 +19,8 @@ public class Solution
             points[i] = new Point(x, y);
         }
 
-        var tspSolver = new TspSolver(n, points, stopwatch);
-        var result = tspSolver.Solve();
+        var tspSolver = new TspSolver(n, points);
+        var result = tspSolver.Solve(() => stopwatch.ElapsedMilliseconds >= 4950);
         stopwatch.Stop();
 
         Console.Error.WriteLine($"[DEBUG] Solving TSP for {n} points.");
@@ -35,15 +35,15 @@ public class Solution
             Console.Error.WriteLine($"[DEBUG] Improvement: {improvement:P2}.");
         }
         Console.Error.WriteLine($"[DEBUG] SA Iterations: {result.Iterations}.");
-        
+
         Console.WriteLine(string.Join(" ", result.Path));
-        
+
         Console.Error.WriteLine($"[DEBUG] Path found. Tour contains {result.Path.Length} points.");
         Console.Error.WriteLine($"[DEBUG] Total execution time: {stopwatch.ElapsedMilliseconds} ms");
     }
 }
 
-public class TspResult
+public sealed class TspResult
 {
     public int[] Path { get; set; }
     public double InitialEnergy { get; set; }
@@ -58,11 +58,7 @@ public readonly struct Point
     public readonly int X;
     public readonly int Y;
 
-    public Point(int x, int y)
-    {
-        X = x;
-        Y = y;
-    }
+    public Point(int x, int y) { X = x; Y = y; }
 
     public static double Distance(Point p1, Point p2)
     {
@@ -72,33 +68,149 @@ public readonly struct Point
     }
 }
 
-public class TspSolver
+public interface IAnnealingProblem<TState> where TState : class
+{
+    double CalculateEnergy(TState state);
+    (double energyDelta, Action commitChange) ProposeChange(TState state);
+    TState CloneState(TState state);
+    void CopyState(TState source, TState destination);
+}
+
+public sealed class SimulatedAnnealingSolver<TState> where TState : class
+{
+    private readonly IAnnealingProblem<TState> _problem;
+    private readonly Random _random;
+    private readonly double _initialTemperature;
+    private readonly double _coolingRate;
+
+    public SimulatedAnnealingSolver(IAnnealingProblem<TState> problem, double initialTemperature, double coolingRate)
+    {
+        _problem = problem;
+        _initialTemperature = initialTemperature;
+        _coolingRate = coolingRate;
+        _random = new Random();
+    }
+
+    public (TState bestState, double bestEnergy, long iterations) Solve(TState initialState, Func<bool> shouldStop)
+    {
+        var currentState = _problem.CloneState(initialState);
+        var bestState = _problem.CloneState(initialState);
+
+        var currentEnergy = _problem.CalculateEnergy(currentState);
+        var bestEnergy = currentEnergy;
+
+        var temperature = _initialTemperature;
+        long iterations = 0;
+
+        while (!shouldStop())
+        {
+            iterations++;
+
+            var (energyDelta, commitChange) = _problem.ProposeChange(currentState);
+
+            if (energyDelta < 0 || (temperature > 1e-9 && _random.NextDouble() < Math.Exp(-energyDelta / temperature)))
+            {
+                commitChange();
+                currentEnergy += energyDelta;
+
+                if (currentEnergy < bestEnergy)
+                {
+                    bestEnergy = currentEnergy;
+                    _problem.CopyState(currentState, bestState);
+                }
+            }
+
+            temperature *= _coolingRate;
+        }
+
+        return (bestState, bestEnergy, iterations);
+    }
+}
+
+public sealed class TspState
+{
+    public readonly int[] Path;
+    public TspState(int[] path) => Path = path;
+}
+
+public sealed class TspProblem : IAnnealingProblem<TspState>
 {
     private readonly int _n;
     private readonly double[,] _distances;
-    private readonly Stopwatch _stopwatch;
     private readonly Random _random;
-    private const int TimeLimitMs = 4990; 
-    private const double StartTemperature = 100.0;
-    private const double CoolingRate = 0.99;
 
-    public TspSolver(int n, Point[] points, Stopwatch stopwatch)
+    public TspProblem(int n, double[,] distances)
     {
         _n = n;
-        _stopwatch = stopwatch;
+        _distances = distances;
         _random = new Random();
+    }
+
+    public double CalculateEnergy(TspState state)
+    {
+        var path = state.Path;
+        var length = 0.0;
+        for (var i = 0; i < _n - 1; i++)
+        {
+            length += _distances[path[i], path[i + 1]];
+        }
+        length += _distances[path[_n - 1], path[0]];
+        return length;
+    }
+
+    public (double energyDelta, Action commitChange) ProposeChange(TspState state)
+    {
+        var path = state.Path;
+        var i = _random.Next(0, _n);
+        var j = _random.Next(0, _n);
+
+        while (i == j) j = _random.Next(0, _n);
+
+        if (i > j) (i, j) = (j, i);
+
+        var p_i = path[i];
+        var p_j = path[j];
+        var p_i_prev = path[i == 0 ? _n - 1 : i - 1];
+        var p_j_next = path[j == _n - 1 ? 0 : j + 1];
+
+        var delta = (_distances[p_i_prev, p_j] + _distances[p_i, p_j_next])
+                  - (_distances[p_i_prev, p_i] + _distances[p_j, p_j_next]);
+
+        void CommitChange() => Array.Reverse(path, i, j - i + 1);
+
+        return (delta, CommitChange);
+    }
+
+    public TspState CloneState(TspState state) => new TspState((int[])state.Path.Clone());
+    public void CopyState(TspState source, TspState destination) => Array.Copy(source.Path, destination.Path, _n);
+}
+
+public sealed class TspSolver
+{
+    private readonly int _n;
+    private readonly double[,] _distances;
+    private const double StartTemperature = 100000.0;
+    private const double CoolingRate = 0.99999;
+
+    public TspSolver(int n, Point[] points)
+    {
+        _n = n;
         _distances = new double[n, n];
         PrecomputeDistances(points);
     }
-    
-    public TspResult Solve()
-    {
-        var initialPath = GenerateInitialTour();
-        var initialEnergy = CalculateTourLength(initialPath);
 
-        var (finalPath, finalEnergy, iterations) = RunSimulatedAnnealing(initialPath, initialEnergy);
-        
-        var normalizedPath = NormalizePathToStartWithZero(finalPath);
+    public TspResult Solve(Func<bool> shouldStop)
+    {
+        var initialTour = GenerateInitialTour();
+        var tspProblem = new TspProblem(_n, _distances);
+        var saSolver = new SimulatedAnnealingSolver<TspState>(tspProblem, StartTemperature, CoolingRate);
+
+        var initialState = new TspState(initialTour);
+        var initialEnergy = tspProblem.CalculateEnergy(initialState);
+
+        var (finalState, finalEnergy, iterations) = saSolver.Solve(initialState, shouldStop);
+
+        var normalizedPath = NormalizePathToStartWithZero(finalState.Path);
 
         var finalTour = new int[_n + 1];
         Array.Copy(normalizedPath, finalTour, _n);
@@ -127,14 +239,15 @@ public class TspSolver
             }
         }
     }
-    
+
     private int[] GenerateInitialTour()
     {
-        var path = new List<int>(_n);
+        var path = new int[_n];
         var visited = new bool[_n];
+        path[0] = 0;
+        visited[0] = true;
         var current = 0;
-        path.Add(current);
-        visited[current] = true;
+
         for (var i = 1; i < _n; i++)
         {
             var nearest = -1;
@@ -152,70 +265,21 @@ public class TspSolver
                 }
             }
             current = nearest;
-            path.Add(current);
+            path[i] = current;
             visited[current] = true;
         }
-        return path.ToArray();
-    }
-
-    private double CalculateTourLength(int[] path)
-    {
-        var length = 0.0;
-        for (var i = 0; i < _n - 1; i++)
-        {
-            length += _distances[path[i], path[i + 1]];
-        }
-        length += _distances[path[_n - 1], path[0]];
-        return length;
-    }
-    
-    private (int[] path, double energy, long iterations) RunSimulatedAnnealing(int[] initialPath, double initialEnergy)
-    {
-        var currentPath = (int[])initialPath.Clone();
-        var bestPath = (int[])initialPath.Clone();
-        var currentEnergy = initialEnergy;
-        var bestEnergy = initialEnergy;
-        var temperature = StartTemperature;
-        long iterations = 0;
-        
-        while (_stopwatch.ElapsedMilliseconds < TimeLimitMs)
-        {
-            iterations++;
-            var i = _random.Next(0, _n);
-            var j = _random.Next(0, _n);
-            if (i == j) continue;
-            if (i > j) { var temp = i; i = j; j = temp; }
-            var p_i_prev = currentPath[(i + _n - 1) % _n];
-            var p_i = currentPath[i];
-            var p_j = currentPath[j];
-            var p_j_next = currentPath[(j + 1) % _n];
-            
-            var delta = (_distances[p_i_prev, p_j] + _distances[p_i, p_j_next])
-                      - (_distances[p_i_prev, p_i] + _distances[p_j, p_j_next]);
-
-            if (delta < 0 || _random.NextDouble() < Math.Exp(-delta / temperature))
-            {
-                Array.Reverse(currentPath, i, j - i + 1);
-                currentEnergy += delta;
-                if (currentEnergy < bestEnergy)
-                {
-                    bestEnergy = currentEnergy;
-                    Array.Copy(currentPath, bestPath, _n);
-                }
-            }
-            temperature *= CoolingRate;
-        }
-        return (bestPath, bestEnergy, iterations);
+        return path;
     }
 
     private int[] NormalizePathToStartWithZero(int[] path)
     {
         var zeroIndex = Array.IndexOf(path, 0);
+        if (zeroIndex == 0) return path;
+
         var normalizedPath = new int[_n];
-        for (var i = 0; i < _n; i++)
-        {
-            normalizedPath[i] = path[(zeroIndex + i) % _n];
-        }
+        Array.Copy(path, zeroIndex, normalizedPath, 0, _n - zeroIndex);
+        Array.Copy(path, 0, normalizedPath, _n - zeroIndex, zeroIndex);
+
         return normalizedPath;
     }
 }

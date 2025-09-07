@@ -1,14 +1,12 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
+using System.Text;
 
 class Solution
 {
-
     static void Main(string[] args)
     {
         int numPuzzles = int.Parse(Console.ReadLine());
@@ -63,7 +61,6 @@ class Solution
 public class KillerSudokuSolver
 {
     private static readonly Dictionary<(int, int), List<List<int>>> ComboCache = new();
-
     private readonly List<Cage> _cages;
     private readonly List<Placement> _placements = new List<Placement>();
     private readonly int _numColumns;
@@ -79,16 +76,19 @@ public class KillerSudokuSolver
         var candidates = BuildAndFilterCandidates();
         GeneratePlacements(candidates);
 
-        var totalNodes = _placements.Sum(p => 1 + p.Cage.Cells.Count * 3);
-        var solver = new AlgorithmXSolver<Placement>(_numColumns, _numColumns, totalNodes, _cages.Count);
+        var totalNodes = _placements.Sum(p => p.Cage.Cells.Count * 3 + 1);
+        var solverOptions = new AlgorithmXOptions(Strategy: SolverStrategy.FindFirst, SortAndDedupRow: true);
+        var solver = new AlgorithmXSolver<Placement>(_numColumns, _numColumns, totalNodes, _cages.Count, solverOptions);
 
+        var columnsBuffer = new int[1 + 9 * 3];
         foreach (var placement in _placements)
         {
-            solver.AddRow(GetColumnIndices(placement), placement);
+            int count = GetColumnIndices(placement, columnsBuffer);
+            solver.AddRow(columnsBuffer, count, placement);
         }
 
-        var solutionPlacements = solver.EnumerateSolutions().FirstOrDefault();
-        return solutionPlacements != null ? DecodeSolution(solutionPlacements) : null;
+        var solutionPlacements = solver.Solve();
+        return DecodeSolution(solutionPlacements);
     }
 
     private Dictionary<(int, int), HashSet<int>> BuildAndFilterCandidates()
@@ -121,9 +121,7 @@ public class KillerSudokuSolver
                     }
                 }
             }
-
             if (changed) continue;
-
             for (int i = 0; i < 9; i++)
             {
                 if (FindHiddenSinglesInRow(candidates, i)) changed = true;
@@ -131,7 +129,6 @@ public class KillerSudokuSolver
                 if (FindHiddenSinglesInBox(candidates, i)) changed = true;
             }
         } while (changed);
-
         return candidates;
     }
 
@@ -161,7 +158,6 @@ public class KillerSudokuSolver
         bool changed = false;
         var valuePlacements = new List<(int, int)>[10];
         for (int i = 1; i <= 9; i++) valuePlacements[i] = new List<(int, int)>();
-
         foreach (var cell in unitCells)
         {
             foreach (var val in candidates[cell])
@@ -169,7 +165,6 @@ public class KillerSudokuSolver
                 valuePlacements[val].Add(cell);
             }
         }
-
         for (int val = 1; val <= 9; val++)
         {
             if (valuePlacements[val].Count == 1)
@@ -200,7 +195,6 @@ public class KillerSudokuSolver
         return FindHiddenSinglesInUnit(candidates, Enumerable.Range(0, 9).Select(i => (startRow + i / 3, startCol + i % 3)));
     }
 
-
     private void GeneratePlacements(Dictionary<(int, int), HashSet<int>> candidates)
     {
         foreach (var cage in _cages)
@@ -217,10 +211,11 @@ public class KillerSudokuSolver
     {
         var currentPerm = new int[cage.Cells.Count];
         var usedComboIndices = new bool[combo.Count];
-        PermuteAndPlace(0, cage, combo, candidates, currentPerm, usedComboIndices);
+        var occupiedInPeers = new bool[3, 9, 9];
+        PermuteAndPlace(0, cage, combo, candidates, currentPerm, usedComboIndices, occupiedInPeers);
     }
 
-    private void PermuteAndPlace(int cellIndex, Cage cage, List<int> combo, Dictionary<(int, int), HashSet<int>> candidates, int[] currentPerm, bool[] usedComboIndices)
+    private void PermuteAndPlace(int cellIndex, Cage cage, List<int> combo, Dictionary<(int, int), HashSet<int>> candidates, int[] currentPerm, bool[] usedComboIndices, bool[,,] occupiedInPeers)
     {
         if (cellIndex == cage.Cells.Count)
         {
@@ -229,6 +224,8 @@ public class KillerSudokuSolver
         }
 
         var cell = cage.Cells[cellIndex];
+        int r = cell.r, c = cell.c, b = (r / 3) * 3 + c / 3;
+
         for (int i = 0; i < combo.Count; i++)
         {
             if (!usedComboIndices[i])
@@ -236,20 +233,33 @@ public class KillerSudokuSolver
                 int valueToPlace = combo[i];
                 if (candidates[cell].Contains(valueToPlace))
                 {
+                    if (occupiedInPeers[0, r, valueToPlace - 1] ||
+                        occupiedInPeers[1, c, valueToPlace - 1] ||
+                        occupiedInPeers[2, b, valueToPlace - 1])
+                    {
+                        continue;
+                    }
                     usedComboIndices[i] = true;
                     currentPerm[cellIndex] = valueToPlace;
-                    PermuteAndPlace(cellIndex + 1, cage, combo, candidates, currentPerm, usedComboIndices);
+                    occupiedInPeers[0, r, valueToPlace - 1] = true;
+                    occupiedInPeers[1, c, valueToPlace - 1] = true;
+                    occupiedInPeers[2, b, valueToPlace - 1] = true;
+                    PermuteAndPlace(cellIndex + 1, cage, combo, candidates, currentPerm, usedComboIndices, occupiedInPeers);
+                    occupiedInPeers[0, r, valueToPlace - 1] = false;
+                    occupiedInPeers[1, c, valueToPlace - 1] = false;
+                    occupiedInPeers[2, b, valueToPlace - 1] = false;
                     usedComboIndices[i] = false;
                 }
             }
         }
     }
 
-    private List<int> GetColumnIndices(Placement p)
+    private int GetColumnIndices(Placement p, int[] buffer)
     {
         var cage = p.Cage;
         var perm = p.Permutation;
-        var indices = new List<int> { cage.Id };
+        buffer[0] = cage.Id;
+        int count = 1;
         var cageOffset = _cages.Count;
         var rowValOffset = cageOffset;
         var colValOffset = cageOffset + 81;
@@ -259,19 +269,19 @@ public class KillerSudokuSolver
         {
             var r = cage.Cells[i].r;
             var c = cage.Cells[i].c;
-            var v = perm[i];
+            var v = perm[i] - 1;
             var b = (r / 3) * 3 + c / 3;
-            indices.Add(rowValOffset + r * 9 + (v - 1));
-            indices.Add(colValOffset + c * 9 + (v - 1));
-            indices.Add(regionValOffset + b * 9 + (v - 1));
+            buffer[count++] = rowValOffset + r * 9 + v;
+            buffer[count++] = colValOffset + c * 9 + v;
+            buffer[count++] = regionValOffset + b * 9 + v;
         }
-        return indices;
+        return count;
     }
 
     private int[,] DecodeSolution(Placement[] solutionPlacements)
     {
+        if (solutionPlacements == null) return null;
         var grid = new int[9, 9];
-        if (solutionPlacements == null) return grid;
         foreach (var p in solutionPlacements)
         {
             for (var i = 0; i < p.Cage.Cells.Count; i++)
@@ -361,10 +371,10 @@ public class Placement
     }
 }
 
-public enum SolverStrategy { Recursive, Iterative }
+public enum SolverStrategy { FindFirst, FindAll }
 
 public readonly record struct AlgorithmXOptions(
-    SolverStrategy Strategy = SolverStrategy.Iterative,
+    SolverStrategy Strategy = SolverStrategy.FindFirst,
     bool SortAndDedupRow = false,
     bool EarlyAbortOnZeroColumn = true,
     bool TieBreakStopAtOne = true,
@@ -382,239 +392,151 @@ public class AlgorithmXSolver<T> where T : class
     }
 
     private readonly DlxNode[] _nodes;
-    private readonly AlgorithmXOptions _opt;
-    private readonly SolverStrategy _strategy;
+    private readonly int _header;
+    private int _nodeCount;
+    private readonly T[] _solutionBuffer;
+    private int _solutionDepth;
     private readonly bool _earlyAbortOnZeroColumn;
     private readonly bool _tieBreakStopAtOne;
-    private int _nodeCount;
-    private readonly T[] _solution;
-    private readonly int _maxSolutionDepth;
-    private readonly int[] _iterativeState;
-    private int _recursiveSolutionDepth;
+    private readonly bool _sortAndDedupRow;
+    private readonly SolverStrategy _strategy;
 
-    public AlgorithmXSolver(int numPrimaryColumns, int numTotalColumns, int maxNodes, int maxSolutionDepth, AlgorithmXOptions opt = default)
+    public AlgorithmXSolver(int numPrimaryColumns, int numTotalColumns, int maxNodes, int maxSolutionDepth, AlgorithmXOptions options = default)
     {
-        _opt = opt;
-        _strategy = opt.Strategy;
-        _earlyAbortOnZeroColumn = opt.EarlyAbortOnZeroColumn;
-        _tieBreakStopAtOne = opt.TieBreakStopAtOne;
-        _maxSolutionDepth = maxSolutionDepth;
+        _strategy = options.Strategy;
+        _sortAndDedupRow = options.SortAndDedupRow;
+        _earlyAbortOnZeroColumn = options.EarlyAbortOnZeroColumn;
+        _tieBreakStopAtOne = options.TieBreakStopAtOne;
         var poolSize = numTotalColumns + 1 + maxNodes;
-
         _nodes = new DlxNode[poolSize];
-        _solution = new T[maxSolutionDepth];
-
-        if (_strategy == SolverStrategy.Iterative)
-        {
-            _iterativeState = new int[maxSolutionDepth];
-        }
-        _recursiveSolutionDepth = 0;
-
+        _solutionBuffer = new T[maxSolutionDepth];
+        _header = 0;
         for (int i = 0; i <= numTotalColumns; i++)
         {
-            _nodes[i].Up = i;
-            _nodes[i].Down = i;
-            _nodes[i].ColHeader = i;
-            _nodes[i].Size = 0;
+            _nodes[i].Left = i; _nodes[i].Right = i;
+            _nodes[i].Up = i; _nodes[i].Down = i;
+            _nodes[i].ColHeader = i; _nodes[i].Size = 0;
         }
-
-        int header = 0;
-        _nodes[header].Right = header;
-        _nodes[header].Left = header;
-        int limit = _opt.IncludeAllColumnsInHeader ? numTotalColumns : numPrimaryColumns;
-
+        _nodes[_header].Right = _header;
+        _nodes[_header].Left = _header;
+        int limit = options.IncludeAllColumnsInHeader ? numTotalColumns : numPrimaryColumns;
         for (int i = 1; i <= limit; i++)
         {
-            int rightOfHeader = _nodes[header].Right;
-            _nodes[i].Right = rightOfHeader;
-            _nodes[i].Left = header;
-            _nodes[rightOfHeader].Left = i;
-            _nodes[header].Right = i;
+            int r = _nodes[_header].Right;
+            _nodes[i].Right = r; _nodes[i].Left = _header;
+            _nodes[r].Left = i; _nodes[_header].Right = i;
         }
-
         _nodeCount = numTotalColumns + 1;
     }
 
-    public AlgorithmXSolver<T> AddRow(ReadOnlySpan<int> columns, T rowPayload)
+    public void AddRow(int[] columns, int count, T rowPayload)
     {
-        if (columns.IsEmpty) return this;
-        if (_opt.SortAndDedupRow)
+        if (count <= 0) return;
+        if (_sortAndDedupRow)
         {
-            int[] tempArr = columns.ToArray();
-            int count = SortAndDedup(tempArr);
-            AddRowInternal(new ReadOnlySpan<int>(tempArr, 0, count), rowPayload);
+            Array.Sort(columns, 0, count);
+            int w = 1;
+            for (int i = 1; i < count; i++)
+                if (columns[i] != columns[i - 1]) columns[w++] = columns[i];
+            count = w;
         }
-        else
-        {
-            AddRowInternal(columns, rowPayload);
-        }
-        return this;
-    }
-
-    public AlgorithmXSolver<T> AddRow(List<int> columns, T rowPayload)
-    {
-        if (columns == null || columns.Count == 0) return this;
-        var span = CollectionsMarshal.AsSpan(columns);
-        return AddRow(span, rowPayload);
-    }
-
-    public AlgorithmXSolver<T> AddRow(int[] columns, T rowPayload) => AddRow(new ReadOnlySpan<int>(columns), rowPayload);
-
-    private static int SortAndDedup(int[] columns)
-    {
-        if (columns.Length == 0) return 0;
-        Array.Sort(columns);
-        int w = 1;
-        for (int i = 1; i < columns.Length; i++)
-        {
-            if (columns[i] != columns[i - 1])
-            {
-                columns[w++] = columns[i];
-            }
-        }
-        return w;
-    }
-
-    private void AddRowInternal(ReadOnlySpan<int> columns, T rowPayload)
-    {
         int firstNode = -1;
-        foreach (var colIdx in columns)
+        for (int ci = 0; ci < count; ci++)
         {
-            firstNode = AddNodeToRow(colIdx, rowPayload, firstNode);
-        }
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private int AddNodeToRow(int colIdx, T rowPayload, int firstNode)
-    {
-        int headerIdx = colIdx + 1;
-        int newNode = _nodeCount++;
-
-        ref var col = ref _nodes[headerIdx];
-        ref var node = ref _nodes[newNode];
-
-        col.Size++;
-        node.RowPayload = rowPayload;
-        node.ColHeader = headerIdx;
-        node.Up = col.Up;
-        node.Down = headerIdx;
-        _nodes[col.Up].Down = newNode;
-        col.Up = newNode;
-
-        if (firstNode == -1)
-        {
-            firstNode = newNode;
-            node.Left = newNode;
-            node.Right = newNode;
-        }
-        else
-        {
-            node.Left = _nodes[firstNode].Left;
-            node.Right = firstNode;
-            _nodes[_nodes[firstNode].Left].Right = newNode;
-            _nodes[firstNode].Left = newNode;
-        }
-        return firstNode;
-    }
-
-    public T[] Solve() => EnumerateSolutions().FirstOrDefault();
-
-    public IEnumerable<T[]> EnumerateSolutions()
-    {
-        return _strategy switch
-        {
-            SolverStrategy.Iterative => EnumerateSolutionsIterative(),
-            SolverStrategy.Recursive => EnumerateSolutionsRecursive(),
-            _ => throw new InvalidOperationException("Unsupported solver strategy."),
-        };
-    }
-
-    private IEnumerable<T[]> EnumerateSolutionsIterative()
-    {
-        int k = 0;
-        while (k >= 0)
-        {
-            if (k < _maxSolutionDepth && _nodes[0].Right != 0)
+            int colHeaderNodeIndex = columns[ci] + 1;
+            int newNodeIndex = _nodeCount++;
+            ref var col = ref _nodes[colHeaderNodeIndex];
+            ref var node = ref _nodes[newNodeIndex];
+            col.Size++;
+            node.RowPayload = rowPayload; node.ColHeader = colHeaderNodeIndex;
+            node.Up = col.Up; node.Down = colHeaderNodeIndex;
+            _nodes[col.Up].Down = newNodeIndex; col.Up = newNodeIndex;
+            if (firstNode == -1)
             {
-                int c = ChooseColumn();
-                if (_earlyAbortOnZeroColumn && c == 0) { k--; continue; }
-
-                Cover(c);
-                _iterativeState[k] = _nodes[c].Down;
+                firstNode = newNodeIndex; node.Left = newNodeIndex; node.Right = newNodeIndex;
             }
             else
             {
-                if (_nodes[0].Right == 0)
-                {
-                    T[] result = new T[k];
-                    Array.Copy(_solution, result, k);
-                    yield return result;
-                }
-                k--;
-                continue;
-            }
-
-            while (true)
-            {
-                int r = _iterativeState[k];
-                int c = _nodes[r].ColHeader;
-
-                if (r != c)
-                {
-                    _solution[k] = _nodes[r].RowPayload;
-                    for (int j = _nodes[r].Right; j != r; j = _nodes[j].Right)
-                        Cover(_nodes[j].ColHeader);
-                    k++;
-                    break;
-                }
-                else
-                {
-                    Uncover(c);
-                    k--;
-                    if (k < 0) break;
-
-                    int prev_r = _iterativeState[k];
-                    _solution[k] = null;
-                    for (int j = _nodes[prev_r].Left; j != prev_r; j = _nodes[j].Left)
-                        Uncover(_nodes[j].ColHeader);
-
-                    _iterativeState[k] = _nodes[prev_r].Down;
-                }
+                node.Left = _nodes[firstNode].Left; node.Right = firstNode;
+                _nodes[_nodes[firstNode].Left].Right = newNodeIndex;
+                _nodes[firstNode].Left = newNodeIndex;
             }
         }
     }
 
-    private IEnumerable<T[]> EnumerateSolutionsRecursive()
+    public T[] Solve()
+    {
+        T[] firstSolution = null;
+        if (_strategy == SolverStrategy.FindFirst)
+        {
+            SearchFindFirst(sol => { firstSolution = sol; });
+        }
+        else
+        {
+            firstSolution = EnumerateSolutions().FirstOrDefault();
+        }
+        return firstSolution;
+    }
+
+    public IEnumerable<T[]> EnumerateSolutions()
     {
         var solutions = new List<T[]>();
-        SearchRecursive(sol => solutions.Add(sol));
+        if (_strategy == SolverStrategy.FindFirst)
+        {
+            SearchFindFirst(sol => solutions.Add(sol));
+        }
+        else
+        {
+            SearchFindAll(sol => solutions.Add(sol));
+        }
         return solutions;
     }
 
-    private void SearchRecursive(Action<T[]> onSolutionFound)
+    private bool SearchFindFirst(Action<T[]> onSolutionFound)
     {
-        if (_nodes[0].Right == 0)
+        if (_nodes[_header].Right == _header)
         {
-            var result = new T[_recursiveSolutionDepth];
-            Array.Copy(_solution, result, _recursiveSolutionDepth);
+            var result = new T[_solutionDepth];
+            Array.Copy(_solutionBuffer, result, _solutionDepth);
             onSolutionFound(result);
-            return;
+            return true;
         }
-
         int c = ChooseColumn();
-        if (_earlyAbortOnZeroColumn && c == 0) return;
-
+        if (_earlyAbortOnZeroColumn && c == 0) return false;
         Cover(c);
         for (int r_node = _nodes[c].Down; r_node != c; r_node = _nodes[r_node].Down)
         {
-            _solution[_recursiveSolutionDepth++] = _nodes[r_node].RowPayload;
-
+            _solutionBuffer[_solutionDepth++] = _nodes[r_node].RowPayload;
             for (int j_node = _nodes[r_node].Right; j_node != r_node; j_node = _nodes[j_node].Right)
                 Cover(_nodes[j_node].ColHeader);
+            if (SearchFindFirst(onSolutionFound)) return true;
+            _solutionDepth--;
+            for (int j_node = _nodes[r_node].Left; j_node != r_node; j_node = _nodes[j_node].Left)
+                Uncover(_nodes[j_node].ColHeader);
+        }
+        Uncover(c);
+        return false;
+    }
 
-            SearchRecursive(onSolutionFound);
-
-            _recursiveSolutionDepth--;
+    private void SearchFindAll(Action<T[]> onSolutionFound)
+    {
+        if (_nodes[_header].Right == _header)
+        {
+            var result = new T[_solutionDepth];
+            Array.Copy(_solutionBuffer, result, _solutionDepth);
+            onSolutionFound(result);
+            return;
+        }
+        int c = ChooseColumn();
+        if (_earlyAbortOnZeroColumn && c == 0) return;
+        Cover(c);
+        for (int r_node = _nodes[c].Down; r_node != c; r_node = _nodes[r_node].Down)
+        {
+            _solutionBuffer[_solutionDepth++] = _nodes[r_node].RowPayload;
+            for (int j_node = _nodes[r_node].Right; j_node != r_node; j_node = _nodes[j_node].Right)
+                Cover(_nodes[j_node].ColHeader);
+            SearchFindAll(onSolutionFound);
+            _solutionDepth--;
             for (int j_node = _nodes[r_node].Left; j_node != r_node; j_node = _nodes[j_node].Left)
                 Uncover(_nodes[j_node].ColHeader);
         }
@@ -626,14 +548,14 @@ public class AlgorithmXSolver<T> where T : class
     {
         int minSize = int.MaxValue;
         int bestCol = 0;
-        for (int c = _nodes[0].Right; c != 0; c = _nodes[c].Right)
+        for (int c_header = _nodes[_header].Right; c_header != _header; c_header = _nodes[c_header].Right)
         {
-            int s = _nodes[c].Size;
+            int s = _nodes[c_header].Size;
             if (_earlyAbortOnZeroColumn && s == 0) return 0;
             if (s < minSize)
             {
                 minSize = s;
-                bestCol = c;
+                bestCol = c_header;
                 if (_tieBreakStopAtOne && s <= 1) break;
             }
         }
@@ -643,10 +565,10 @@ public class AlgorithmXSolver<T> where T : class
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void Cover(int c)
     {
-        _nodes[_nodes[c].Left].Right = _nodes[c].Right;
-        _nodes[_nodes[c].Right].Left = _nodes[c].Left;
-
-        for (int i = _nodes[c].Down; i != c; i = _nodes[i].Down)
+        ref var rc = ref _nodes[c];
+        _nodes[rc.Left].Right = rc.Right;
+        _nodes[rc.Right].Left = rc.Left;
+        for (int i = rc.Down; i != c; i = _nodes[i].Down)
         {
             for (int j = _nodes[i].Right; j != i; j = _nodes[j].Right)
             {
@@ -661,7 +583,8 @@ public class AlgorithmXSolver<T> where T : class
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void Uncover(int c)
     {
-        for (int i = _nodes[c].Up; i != c; i = _nodes[i].Up)
+        ref var rc = ref _nodes[c];
+        for (int i = rc.Up; i != c; i = _nodes[i].Up)
         {
             for (int j = _nodes[i].Left; j != i; j = _nodes[j].Left)
             {
@@ -671,8 +594,7 @@ public class AlgorithmXSolver<T> where T : class
                 _nodes[nodeJ.Down].Up = j;
             }
         }
-
-        _nodes[_nodes[c].Left].Right = c;
-        _nodes[_nodes[c].Right].Left = c;
+        _nodes[rc.Left].Right = c;
+        _nodes[rc.Right].Left = c;
     }
 }

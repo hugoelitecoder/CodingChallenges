@@ -4,11 +4,11 @@ using System.Diagnostics;
 using System.Linq;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 
 class Player
 {
-    #region Player Boilerplate
     static readonly Dictionary<char, (int x, int y, int dx, int dy)[]> Shapes = new() {
         {'F', new[]{(0,0,0,1),(1,0,0,1),(0,0,1,0),(1,0,1,0)}}, {'H', new[]{(0,0,1,0),(1,0,0,1),(1,0,1,0),(1,1,1,0)}},
         {'J', new[]{(0,1,1,0),(1,1,1,0),(1,0,1,0),(2,0,0,1)}}, {'L', new[]{(0,0,1,0),(1,0,1,0),(2,0,1,0),(3,0,0,1)}},
@@ -57,7 +57,6 @@ class Player
     }
     static (int x, int y, int dx, int dy)[] Transform((int x, int y, int dx, int dy)[] src, int flip, int rot, int maxX, int maxY) { var dst = new (int x, int y, int dx, int dy)[src.Length]; int i = 0; foreach (var s in src) { int x = s.x, y = s.y, dx = s.dx, dy = s.dy; if (flip == 1) y = maxY - y - dy; int cx = maxX, cy = maxY; for (int k = 0; k < rot; k++) { int nx = y, ny = cx - x - dx; (dx, dy, x, y) = (dy, dx, nx, ny); (cx, cy) = (cy, cx); } dst[i++] = (x, y, dx, dy); } return dst; }
     static int EdgeIndex(int x, int y, int dx, int dy) { if (dx == 0 && dy == 1) return x * (COLS - 1) + y; if (dx == 1 && dy == 0) return H_EDGES + x * COLS + y; throw new ArgumentException(); }
-    #endregion
 
     public static void Main(string[] args)
     {
@@ -112,7 +111,8 @@ class Player
                 int maxNodes = 1200000;
                 int maxSolutionDepth = numShapeCols;
 
-                var solver = new AlgorithmX<Placement>(numPrimaryCols, numTotalCols, maxNodes, maxSolutionDepth);
+                var solverOptions = new AlgorithmXOptions(Strategy: SolverStrategy.FindFirst, SortAndDedupRow: true);
+                var solver = new AlgorithmXSolver<Placement>(numPrimaryCols, numTotalCols, maxNodes, maxSolutionDepth, solverOptions);
 
                 var colBuf = new int[60 + 15 + 49];
                 for (int si = 0; si < numShapeCols; si++)
@@ -159,11 +159,6 @@ class Player
                 {
                     SolutionSequence = solution.ToList();
                     Console.Error.WriteLine($"[DEBUG] Exact solution found by solver in {sw.Elapsed.TotalMilliseconds:F2} ms.");
-                    for (int i = 0; i < SolutionSequence.Count; ++i)
-                    {
-                        var s = SolutionSequence[i];
-                        Console.Error.WriteLine($"[DEBUG] {i}: {s.id} {s.f} {s.r} {s.R} {s.C}");
-                    }
                 }
                 else
                 {
@@ -201,16 +196,17 @@ class Player
     }
 }
 
-public enum SolverStrategy { Recursive, Iterative }
+public enum SolverStrategy { FindFirst, FindAll }
 
 public readonly record struct AlgorithmXOptions(
-    SolverStrategy Strategy = SolverStrategy.Recursive,
+    SolverStrategy Strategy = SolverStrategy.FindFirst,
+    bool SortAndDedupRow = false,
     bool EarlyAbortOnZeroColumn = true,
     bool TieBreakStopAtOne = true,
     bool IncludeAllColumnsInHeader = false
 );
 
-public class AlgorithmX<T> where T : class
+public class AlgorithmXSolver<T> where T : class
 {
     private struct DlxNode
     {
@@ -227,36 +223,33 @@ public class AlgorithmX<T> where T : class
     private int _solutionDepth;
     private readonly bool _earlyAbortOnZeroColumn;
     private readonly bool _tieBreakStopAtOne;
+    private readonly bool _sortAndDedupRow;
+    private readonly SolverStrategy _strategy;
 
-    public AlgorithmX(int numPrimaryColumns, int numTotalColumns, int maxNodes, int maxSolutionDepth, AlgorithmXOptions? options = null)
+    public AlgorithmXSolver(int numPrimaryColumns, int numTotalColumns, int maxNodes, int maxSolutionDepth, AlgorithmXOptions options = default)
     {
-        var opts = options ?? new AlgorithmXOptions();
-        _earlyAbortOnZeroColumn = opts.EarlyAbortOnZeroColumn;
-        _tieBreakStopAtOne = opts.TieBreakStopAtOne;
-
+        _strategy = options.Strategy;
+        _sortAndDedupRow = options.SortAndDedupRow;
+        _earlyAbortOnZeroColumn = options.EarlyAbortOnZeroColumn;
+        _tieBreakStopAtOne = options.TieBreakStopAtOne;
         var poolSize = numTotalColumns + 1 + maxNodes;
         _nodes = new DlxNode[poolSize];
         _solutionBuffer = new T[maxSolutionDepth];
         _header = 0;
-
         for (int i = 0; i <= numTotalColumns; i++)
         {
             _nodes[i].Left = i; _nodes[i].Right = i;
             _nodes[i].Up = i; _nodes[i].Down = i;
             _nodes[i].ColHeader = i; _nodes[i].Size = 0;
         }
-
         _nodes[_header].Right = _header;
         _nodes[_header].Left = _header;
-
-        int limit = opts.IncludeAllColumnsInHeader ? numTotalColumns : numPrimaryColumns;
+        int limit = options.IncludeAllColumnsInHeader ? numTotalColumns : numPrimaryColumns;
         for (int i = 1; i <= limit; i++)
         {
             int r = _nodes[_header].Right;
-            _nodes[i].Right = r;
-            _nodes[i].Left = _header;
-            _nodes[r].Left = i;
-            _nodes[_header].Right = i;
+            _nodes[i].Right = r; _nodes[i].Left = _header;
+            _nodes[r].Left = i; _nodes[_header].Right = i;
         }
         _nodeCount = numTotalColumns + 1;
     }
@@ -264,40 +257,32 @@ public class AlgorithmX<T> where T : class
     public void AddRow(int[] columns, int count, T rowPayload)
     {
         if (count <= 0) return;
-        Array.Sort(columns, 0, count);
-        int w = 1;
-        for (int i = 1; i < count; i++)
+        if (_sortAndDedupRow)
         {
-            if (columns[i] != columns[i - 1]) columns[w++] = columns[i];
+            Array.Sort(columns, 0, count);
+            int w = 1;
+            for (int i = 1; i < count; i++)
+                if (columns[i] != columns[i - 1]) columns[w++] = columns[i];
+            count = w;
         }
-        count = w;
-
         int firstNode = -1;
         for (int ci = 0; ci < count; ci++)
         {
             int colHeaderNodeIndex = columns[ci] + 1;
             int newNodeIndex = _nodeCount++;
-
             ref var col = ref _nodes[colHeaderNodeIndex];
             ref var node = ref _nodes[newNodeIndex];
-
             col.Size++;
-            node.RowPayload = rowPayload;
-            node.ColHeader = colHeaderNodeIndex;
-            node.Up = col.Up;
-            node.Down = colHeaderNodeIndex;
-            _nodes[col.Up].Down = newNodeIndex;
-            col.Up = newNodeIndex;
-
+            node.RowPayload = rowPayload; node.ColHeader = colHeaderNodeIndex;
+            node.Up = col.Up; node.Down = colHeaderNodeIndex;
+            _nodes[col.Up].Down = newNodeIndex; col.Up = newNodeIndex;
             if (firstNode == -1)
             {
-                firstNode = newNodeIndex;
-                node.Left = newNodeIndex; node.Right = newNodeIndex;
+                firstNode = newNodeIndex; node.Left = newNodeIndex; node.Right = newNodeIndex;
             }
             else
             {
-                node.Left = _nodes[firstNode].Left;
-                node.Right = firstNode;
+                node.Left = _nodes[firstNode].Left; node.Right = firstNode;
                 _nodes[_nodes[firstNode].Left].Right = newNodeIndex;
                 _nodes[firstNode].Left = newNodeIndex;
             }
@@ -307,11 +292,32 @@ public class AlgorithmX<T> where T : class
     public T[] Solve()
     {
         T[] firstSolution = null;
-        Search(sol => { firstSolution = sol; });
+        if (_strategy == SolverStrategy.FindFirst)
+        {
+            SearchFindFirst(sol => { firstSolution = sol; });
+        }
+        else
+        {
+            firstSolution = EnumerateSolutions().FirstOrDefault();
+        }
         return firstSolution;
     }
 
-    private bool Search(Action<T[]> onSolutionFound)
+    public IEnumerable<T[]> EnumerateSolutions()
+    {
+        var solutions = new List<T[]>();
+        if (_strategy == SolverStrategy.FindFirst)
+        {
+            SearchFindFirst(sol => solutions.Add(sol));
+        }
+        else
+        {
+            SearchFindAll(sol => solutions.Add(sol));
+        }
+        return solutions;
+    }
+
+    private bool SearchFindFirst(Action<T[]> onSolutionFound)
     {
         if (_nodes[_header].Right == _header)
         {
@@ -320,27 +326,46 @@ public class AlgorithmX<T> where T : class
             onSolutionFound(result);
             return true;
         }
-
         int c = ChooseColumn();
-        if (c == 0) return false;
-
+        if (_earlyAbortOnZeroColumn && c == 0) return false;
         Cover(c);
         for (int r_node = _nodes[c].Down; r_node != c; r_node = _nodes[r_node].Down)
         {
             _solutionBuffer[_solutionDepth++] = _nodes[r_node].RowPayload;
-
             for (int j_node = _nodes[r_node].Right; j_node != r_node; j_node = _nodes[j_node].Right)
                 Cover(_nodes[j_node].ColHeader);
-
-            if (Search(onSolutionFound)) return true;
-
+            if (SearchFindFirst(onSolutionFound)) return true;
             _solutionDepth--;
             for (int j_node = _nodes[r_node].Left; j_node != r_node; j_node = _nodes[j_node].Left)
                 Uncover(_nodes[j_node].ColHeader);
         }
         Uncover(c);
-
         return false;
+    }
+
+    private void SearchFindAll(Action<T[]> onSolutionFound)
+    {
+        if (_nodes[_header].Right == _header)
+        {
+            var result = new T[_solutionDepth];
+            Array.Copy(_solutionBuffer, result, _solutionDepth);
+            onSolutionFound(result);
+            return;
+        }
+        int c = ChooseColumn();
+        if (_earlyAbortOnZeroColumn && c == 0) return;
+        Cover(c);
+        for (int r_node = _nodes[c].Down; r_node != c; r_node = _nodes[r_node].Down)
+        {
+            _solutionBuffer[_solutionDepth++] = _nodes[r_node].RowPayload;
+            for (int j_node = _nodes[r_node].Right; j_node != r_node; j_node = _nodes[j_node].Right)
+                Cover(_nodes[j_node].ColHeader);
+            SearchFindAll(onSolutionFound);
+            _solutionDepth--;
+            for (int j_node = _nodes[r_node].Left; j_node != r_node; j_node = _nodes[j_node].Left)
+                Uncover(_nodes[j_node].ColHeader);
+        }
+        Uncover(c);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -368,7 +393,6 @@ public class AlgorithmX<T> where T : class
         ref var rc = ref _nodes[c];
         _nodes[rc.Left].Right = rc.Right;
         _nodes[rc.Right].Left = rc.Left;
-
         for (int i = rc.Down; i != c; i = _nodes[i].Down)
         {
             for (int j = _nodes[i].Right; j != i; j = _nodes[j].Right)

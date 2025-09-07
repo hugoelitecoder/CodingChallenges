@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Runtime.CompilerServices;
+using System.Diagnostics;
+
 
 #region Data Models
 public abstract record Requirement;
@@ -59,9 +61,12 @@ class Solution
 
         var modeler = new ExactCoverModeler();
         var (reqs, acts) = modeler.BuildModel(students, teacherAvail);
-        
         var solver = new SchedulingSolver(reqs, acts, troublesomePairs);
+
+        var sw = Stopwatch.StartNew();
         var (bestSolution, bestScore, bestScoreDetails) = solver.Solve();
+        sw.Stop();
+        Console.Error.WriteLine($"TIME {sw.ElapsedMilliseconds} ms");
 
         var finalSchedule = new Schedule(bestSolution);
         Console.Write(finalSchedule.Print());
@@ -82,7 +87,7 @@ class SchedulingSolver
     private readonly HashSet<(string, string)> _troublesomePairs;
     private static readonly HashSet<string> LOUD_INST = new() { "Trumpet", "Drums", "Trombone" };
     private static readonly Dictionary<int, int> HourSortOrder = Schedule.HourSortOrder;
-    
+
     public SchedulingSolver(List<Requirement> reqs, Dictionary<Activity, List<Requirement>> acts, HashSet<(string, string)> troublesomePairs)
     {
         _scorer = new Scorer();
@@ -124,10 +129,10 @@ class SchedulingSolver
                 bestScoreDetails = details;
             }
         }
-        
+
         return (bestSolution, bestScore, bestScoreDetails);
     }
-    
+
     private bool IsValidStep(Activity newAction, Activity[] partialSolution, int depth)
     {
         if (newAction is not LessonAssignment lesson)
@@ -150,7 +155,7 @@ class SchedulingSolver
         }
 
         var sortOrder = HourSortOrder[lesson.Hour];
-        
+
         for (int i = 0; i < depth; i++)
         {
             if (partialSolution[i] is LessonAssignment psAction && psAction.Day == lesson.Day)
@@ -169,7 +174,7 @@ class SchedulingSolver
                 }
             }
         }
-        
+
         return true;
     }
 
@@ -184,11 +189,11 @@ class ExactCoverModeler
         var acts = new Dictionary<Activity, List<Requirement>>();
         var allInstruments = students.Select(s => s.Inst).Distinct().ToList();
         var teachingDays = teacherAvail.Keys.ToList();
-        
+
         foreach (var s in students) for (var k = 1; k <= s.Hours; k++) reqs.Add(new StudentLessonRequirement(s.Name, k));
         foreach (var kvp in teacherAvail) foreach (var h in kvp.Value) reqs.Add(new TeacherSlotRequirement(kvp.Key, h));
         foreach (var inst in allInstruments) foreach (var day in teachingDays) reqs.Add(new InstrumentDayRequirement(inst, day));
-        
+
         foreach (var s in students)
             for (var k = 1; k <= s.Hours; k++)
                 foreach (var day in s.Avail.Keys)
@@ -207,10 +212,10 @@ class ExactCoverModeler
                             acts[assignment] = requirements;
                         }
                 }
-        
+
         foreach (var kvp in teacherAvail) foreach (var h in kvp.Value) acts[new SlackTeacherSlot(kvp.Key, h)] = new List<Requirement> { new TeacherSlotRequirement(kvp.Key, h) };
         foreach (var inst in allInstruments) foreach (var day in teachingDays) acts[new SlackInstrumentDay(inst, day)] = new List<Requirement> { new InstrumentDayRequirement(inst, day) };
-        
+
         return (reqs, acts);
     }
 }
@@ -256,7 +261,7 @@ class Schedule
         for (var i = 0; i < 5; i++) DailySortedLessons[i] = new List<Lesson>();
         _lessonMap = new Dictionary<(int, int), (string, string)>();
         if (solutionActions == null) return;
-        
+
         foreach (var lesson in solutionActions.OfType<LessonAssignment>())
         {
             DailySortedLessons[lesson.Day].Add(new Lesson(lesson.Hour, lesson.Name, lesson.Instrument));
@@ -300,7 +305,7 @@ class Scorer
 {
     private static readonly int[] WORK_SLOTS = { 8, 9, 10, 11, 12, 1, 2, 3, 4 };
     private static readonly int[,] SCHEDULING_POINTS = { { 15, 10 }, { 12, 8 }, { 9, 6 }, { 6, 4 }, { 3, 2 } };
-    
+
     public (int, string) CalculateScore(Schedule schedule)
     {
         var LOUD_INST = new HashSet<string>() { "Trumpet", "Drums", "Trombone" };
@@ -351,14 +356,12 @@ public class AlgorithmXSolver<T> where T : class
         _solution = new T[maxSolutionDepth];
         for (int i = 0; i <= numColumns; i++)
         {
-            _nodes[i] = new DlxNode { 
-                Left = i - 1, 
-                Right = i + 1, 
-                Up = i, 
-                Down = i, 
-                ColHeader = i, 
-                Size = 0 
-            };
+            _nodes[i].Left = i - 1;
+            _nodes[i].Right = i + 1;
+            _nodes[i].Up = i;
+            _nodes[i].Down = i;
+            _nodes[i].ColHeader = i;
+            _nodes[i].Size = 0;
         }
         _nodes[0].Left = numColumns;
         _nodes[numColumns].Right = 0;
@@ -367,38 +370,56 @@ public class AlgorithmXSolver<T> where T : class
 
     public void AddRow(List<int> columns, T rowPayload)
     {
-        if (columns.Count == 0) return;
-        int firstNode = -1;
-        foreach (int c_idx in columns)
+        if (columns == null || columns.Count == 0) return;
+
+        for (int i = 1; i < columns.Count; i++)
         {
-            int headerIdx = c_idx + 1;
+            int v = columns[i];
+            int j = i - 1;
+            while (j >= 0 && columns[j] > v) { columns[j + 1] = columns[j]; j--; }
+            columns[j + 1] = v;
+        }
+        int w = 0;
+        for (int i = 0; i < columns.Count; i++)
+            if (i == 0 || columns[i] != columns[i - 1]) columns[w++] = columns[i];
+        if (w == 0) return;
+
+        int firstNode = -1;
+        for (int idx = 0; idx < w; idx++)
+        {
+            int headerIdx = columns[idx] + 1;
+            int newNode = _nodeCount++;
+
             _nodes[headerIdx].Size++;
-            _nodes[_nodeCount].RowPayload = rowPayload;
-            _nodes[_nodeCount].ColHeader = headerIdx;
-            _nodes[_nodeCount].Up = _nodes[headerIdx].Up; 
-            _nodes[_nodeCount].Down = headerIdx;
-            _nodes[_nodes[headerIdx].Up].Down = _nodeCount; 
-            _nodes[headerIdx].Up = _nodeCount;
-            if (firstNode == -1) { 
-                firstNode = _nodeCount; 
-                _nodes[_nodeCount].Left = _nodeCount;
-                _nodes[_nodeCount].Right = _nodeCount; 
+            _nodes[newNode].RowPayload = rowPayload;
+            _nodes[newNode].ColHeader = headerIdx;
+
+            _nodes[newNode].Up = _nodes[headerIdx].Up;
+            _nodes[newNode].Down = headerIdx;
+            _nodes[_nodes[headerIdx].Up].Down = newNode;
+            _nodes[headerIdx].Up = newNode;
+
+            if (firstNode == -1)
+            {
+                firstNode = newNode;
+                _nodes[newNode].Left = newNode;
+                _nodes[newNode].Right = newNode;
             }
-            else {
-                 _nodes[_nodeCount].Left = _nodes[firstNode].Left;
-                 _nodes[_nodeCount].Right = firstNode;
-                 _nodes[_nodes[firstNode].Left].Right =
-                 _nodeCount; _nodes[firstNode].Left = _nodeCount; 
+            else
+            {
+                _nodes[newNode].Left = _nodes[firstNode].Left;
+                _nodes[newNode].Right = firstNode;
+                _nodes[_nodes[firstNode].Left].Right = newNode;
+                _nodes[firstNode].Left = newNode;
             }
-            _nodeCount++;
         }
     }
 
     public IEnumerable<T[]> EnumerateSolutions(Func<T, T[], int, bool> canSelectRow)
     {
-        return Search(0, canSelectRow ?? ((_,__,___) => true));
+        return Search(0, canSelectRow ?? ((_, __, ___) => true));
     }
-    
+
     private IEnumerable<T[]> Search(int k, Func<T, T[], int, bool> canSelectRow)
     {
         if (_nodes[0].Right == 0)
@@ -406,60 +427,73 @@ public class AlgorithmXSolver<T> where T : class
             var result = new T[k]; Array.Copy(_solution, result, k);
             yield return result; yield break;
         }
-        int c = ChooseColumn(); Cover(c);
-        for (int r_node = _nodes[c].Down; r_node != c; r_node = _nodes[r_node].Down)
+
+        int c = ChooseColumn();
+        if (c == 0) yield break;
+
+        Cover(c);
+        for (int r = _nodes[c].Down; r != c; r = _nodes[r].Down)
         {
-            T rowPayload = _nodes[r_node].RowPayload;
-            if (!canSelectRow(rowPayload, _solution, k)) { continue; }
-            _solution[k] = rowPayload;
-            for (int j_node = _nodes[r_node].Right; j_node != r_node; j_node = _nodes[j_node].Right) 
-            {
-                Cover(_nodes[j_node].ColHeader); 
-            }
-            foreach(var solution in Search(k + 1, canSelectRow)) { yield return solution; }
-            for (int j_node = _nodes[r_node].Left; j_node != r_node; j_node = _nodes[j_node].Left) 
-            {
-                Uncover(_nodes[j_node].ColHeader); 
-            }
+            T payload = _nodes[r].RowPayload;
+            if (!canSelectRow(payload, _solution, k)) continue;
+
+            _solution[k] = payload;
+
+            for (int j = _nodes[r].Right; j != r; j = _nodes[j].Right)
+                Cover(_nodes[j].ColHeader);
+
+            foreach (var sol in Search(k + 1, canSelectRow))
+                yield return sol;
+
+            for (int j = _nodes[r].Left; j != r; j = _nodes[j].Left)
+                Uncover(_nodes[j].ColHeader);
         }
         Uncover(c);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int ChooseColumn()
     {
-        int minSize = int.MaxValue; int bestCol = 0;
-        for (int c_header = _nodes[0].Right; c_header != 0; c_header = _nodes[c_header].Right)
+        int minSize = int.MaxValue, bestCol = 0;
+        for (int c = _nodes[0].Right; c != 0; c = _nodes[c].Right)
         {
-            if (_nodes[c_header].Size < minSize) { 
-                minSize = _nodes[c_header].Size; 
-                bestCol = c_header; 
-            }
+            int s = _nodes[c].Size;
+            if (s == 0) return 0;
+            if (s < minSize) { minSize = s; bestCol = c; if (s <= 1) break; }
         }
         return bestCol;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void Cover(int c)
     {
-        _nodes[_nodes[c].Right].Left = _nodes[c].Left; _nodes[_nodes[c].Left].Right = _nodes[c].Right;
+        int rc = _nodes[c].Right, lc = _nodes[c].Left;
+        _nodes[rc].Left = lc;
+        _nodes[lc].Right = rc;
+
         for (int i = _nodes[c].Down; i != c; i = _nodes[i].Down)
             for (int j = _nodes[i].Right; j != i; j = _nodes[j].Right)
-            { 
-                _nodes[_nodes[j].Up].Down = _nodes[j].Down;
-                _nodes[_nodes[j].Down].Up = _nodes[j].Up;
-                _nodes[_nodes[j].ColHeader].Size--; 
+            {
+                int u = _nodes[j].Up, d = _nodes[j].Down, col = _nodes[j].ColHeader;
+                _nodes[u].Down = d;
+                _nodes[d].Up = u;
+                _nodes[col].Size--;
             }
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void Uncover(int c)
     {
         for (int i = _nodes[c].Up; i != c; i = _nodes[i].Up)
             for (int j = _nodes[i].Left; j != i; j = _nodes[j].Left)
             {
-                _nodes[_nodes[j].ColHeader].Size++;
-                _nodes[_nodes[j].Up].Down = j;
-                _nodes[_nodes[j].Down].Up = j; 
+                int col = _nodes[j].ColHeader, u = _nodes[j].Up, d = _nodes[j].Down;
+                _nodes[col].Size++;
+                _nodes[u].Down = j;
+                _nodes[d].Up = j;
             }
-            _nodes[_nodes[c].Right].Left = c;
-            _nodes[_nodes[c].Left].Right = c;
+        int rc = _nodes[c].Right, lc = _nodes[c].Left;
+        _nodes[rc].Left = c;
+        _nodes[lc].Right = c;
     }
 }

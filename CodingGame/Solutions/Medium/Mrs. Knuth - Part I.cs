@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Runtime.CompilerServices;
 
 class Solution
 {
@@ -17,7 +18,7 @@ class Solution
 
         var scheduler = new LessonScheduler(teacherAvailabilityString, studentLines);
         var finalSchedule = scheduler.GenerateSchedule();
-        
+
         Console.Write(finalSchedule.Print());
     }
 }
@@ -29,7 +30,7 @@ public class LessonScheduler
     private readonly List<Student> _students;
 
     private readonly Dictionary<object, int> _reqMap = new Dictionary<object, int>();
-    
+
     public LessonScheduler(string teacherAvailability, List<string> studentLines)
     {
         var parser = new ScheduleParser();
@@ -51,7 +52,7 @@ public class LessonScheduler
             solver.AddRow(GetColumnIndices(choice), choice);
         }
         var solution = solver.EnumerateSolutions().FirstOrDefault();
-        
+
         return new Schedule(solution?.ToList());
     }
 
@@ -81,7 +82,7 @@ public class LessonScheduler
         {
             foreach (var inst in allInstruments) AddReq(("instrument on day", day, inst));
         }
-        
+
         foreach (var student in _students)
         {
             foreach (var day in student.Avail.Keys)
@@ -96,7 +97,7 @@ public class LessonScheduler
         }
         return (reqs, choices);
     }
-    
+
     private List<int> GetColumnIndices(Lesson lesson)
     {
         var indices = new List<int>
@@ -122,7 +123,7 @@ public class ScheduleParser
             .ToDictionary(kv => kv.Key, kv => kv.Value);
         return new Teacher(avail);
     }
-    
+
     public Student ParseStudent(string studentData)
     {
         var parts = studentData.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -182,14 +183,14 @@ public class Schedule
         for (var c = 1; c <= 5; c++) grid[5, c] = "LUNCH";
         int[] rows = { 1, 2, 3, 4, 6, 7, 8, 9 };
         for (var i = 0; i < WORK_HOURS.Length; i++) grid[rows[i], 0] = WORK_HOURS[i].ToString().PadLeft(2);
-        
-        foreach(var lesson in LessonsByTime.Values)
+
+        foreach (var lesson in LessonsByTime.Values)
         {
             var hi = Array.IndexOf(WORK_HOURS, lesson.Hour);
             if (hi == -1) continue;
             var row = rows[hi];
             var col = lesson.Day + 1;
-            grid[row,col] = $"{lesson.Name}/{lesson.Inst}";
+            grid[row, col] = $"{lesson.Name}/{lesson.Inst}";
         }
 
         var sb = new StringBuilder();
@@ -238,7 +239,12 @@ public class AlgorithmXSolver<T>
         _solution = new T[maxSolutionDepth];
         for (int i = 0; i <= numColumns; i++)
         {
-            _nodes[i] = new DlxNode { Left = i - 1, Right = i + 1, Up = i, Down = i, ColHeader = i, Size = 0 };
+            _nodes[i].Left = i - 1;
+            _nodes[i].Right = i + 1;
+            _nodes[i].Up = i;
+            _nodes[i].Down = i;
+            _nodes[i].ColHeader = i;
+            _nodes[i].Size = 0;
         }
         _nodes[0].Left = numColumns;
         _nodes[numColumns].Right = 0;
@@ -247,35 +253,50 @@ public class AlgorithmXSolver<T>
 
     public void AddRow(List<int> columns, T rowPayload)
     {
-        if (columns.Count == 0) return;
-        int firstNode = -1;
-        foreach (int c_idx in columns)
+        if (columns == null || columns.Count == 0) return;
+        for (int i = 1; i < columns.Count; i++)
         {
-            int headerIdx = c_idx + 1;
+            int v = columns[i];
+            int j = i - 1;
+            while (j >= 0 && columns[j] > v) { columns[j + 1] = columns[j]; j--; }
+            columns[j + 1] = v;
+        }
+        int w = 0;
+        for (int i = 0; i < columns.Count; i++)
+            if (i == 0 || columns[i] != columns[i - 1]) columns[w++] = columns[i];
+        if (w == 0) return;
+
+        int firstNode = -1;
+        for (int idx = 0; idx < w; idx++)
+        {
+            int headerIdx = columns[idx] + 1;
+            int newNode = _nodeCount++;
+
             _nodes[headerIdx].Size++;
-            _nodes[_nodeCount].RowPayload = rowPayload;
-            _nodes[_nodeCount].ColHeader = headerIdx;
-            _nodes[_nodeCount].Up = _nodes[headerIdx].Up;
-            _nodes[_nodeCount].Down = headerIdx;
-            _nodes[_nodes[headerIdx].Up].Down = _nodeCount;
-            _nodes[headerIdx].Up = _nodeCount;
+            _nodes[newNode].RowPayload = rowPayload;
+            _nodes[newNode].ColHeader = headerIdx;
+
+            _nodes[newNode].Up = _nodes[headerIdx].Up;
+            _nodes[newNode].Down = headerIdx;
+            _nodes[_nodes[headerIdx].Up].Down = newNode;
+            _nodes[headerIdx].Up = newNode;
+
             if (firstNode == -1)
             {
-                firstNode = _nodeCount;
-                _nodes[_nodeCount].Left = _nodeCount;
-                _nodes[_nodeCount].Right = _nodeCount;
+                firstNode = newNode;
+                _nodes[newNode].Left = newNode;
+                _nodes[newNode].Right = newNode;
             }
             else
             {
-                _nodes[_nodeCount].Left = _nodes[firstNode].Left;
-                _nodes[_nodeCount].Right = firstNode;
-                _nodes[_nodes[firstNode].Left].Right = _nodeCount;
-                _nodes[firstNode].Left = _nodeCount;
+                _nodes[newNode].Left = _nodes[firstNode].Left;
+                _nodes[newNode].Right = firstNode;
+                _nodes[_nodes[firstNode].Left].Right = newNode;
+                _nodes[firstNode].Left = newNode;
             }
-            _nodeCount++;
         }
     }
-    
+
     public IEnumerable<T[]> EnumerateSolutions()
     {
         if (_nodes[0].Right == 0)
@@ -287,73 +308,84 @@ public class AlgorithmXSolver<T>
         }
 
         int c = ChooseColumn();
+        if (c == 0) yield break;
+
         Cover(c);
 
         for (int r_node = _nodes[c].Down; r_node != c; r_node = _nodes[r_node].Down)
         {
-            _solution[_solutionDepth] = _nodes[r_node].RowPayload;
-            _solutionDepth++;
-            for (int j_node = _nodes[r_node].Right; j_node != r_node; j_node = _nodes[j_node].Right)
-            {
-                Cover(_nodes[j_node].ColHeader);
-            }
+            _solution[_solutionDepth++] = _nodes[r_node].RowPayload;
+            for (int j = _nodes[r_node].Right; j != r_node; j = _nodes[j].Right)
+                Cover(_nodes[j].ColHeader);
 
             foreach (var sol in EnumerateSolutions())
-            {
                 yield return sol;
-            }
-            
+
             _solutionDepth--;
-            for (int j_node = _nodes[r_node].Left; j_node != r_node; j_node = _nodes[j_node].Left)
-            {
-                Uncover(_nodes[j_node].ColHeader);
-            }
+            for (int j = _nodes[r_node].Left; j != r_node; j = _nodes[j].Left)
+                Uncover(_nodes[j].ColHeader);
         }
         Uncover(c);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int ChooseColumn()
     {
         int minSize = int.MaxValue;
         int bestCol = 0;
-        for (int c_header = _nodes[0].Right; c_header != 0; c_header = _nodes[c_header].Right)
+        for (int c = _nodes[0].Right; c != 0; c = _nodes[c].Right)
         {
-            if (_nodes[c_header].Size < minSize)
+            int s = _nodes[c].Size;
+            if (s == 0) return 0;
+            if (s < minSize)
             {
-                minSize = _nodes[c_header].Size;
-                bestCol = c_header;
+                minSize = s;
+                bestCol = c;
+                if (s <= 1) break;
             }
         }
         return bestCol;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void Cover(int c)
     {
-        _nodes[_nodes[c].Right].Left = _nodes[c].Left;
-        _nodes[_nodes[c].Left].Right = _nodes[c].Right;
+        int rc = _nodes[c].Right;
+        int lc = _nodes[c].Left;
+        _nodes[rc].Left = lc;
+        _nodes[lc].Right = rc;
+
         for (int i = _nodes[c].Down; i != c; i = _nodes[i].Down)
         {
             for (int j = _nodes[i].Right; j != i; j = _nodes[j].Right)
             {
-                _nodes[_nodes[j].Up].Down = _nodes[j].Down;
-                _nodes[_nodes[j].Down].Up = _nodes[j].Up;
+                int u = _nodes[j].Up;
+                int d = _nodes[j].Down;
+                _nodes[u].Down = d;
+                _nodes[d].Up = u;
                 _nodes[_nodes[j].ColHeader].Size--;
             }
         }
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void Uncover(int c)
     {
         for (int i = _nodes[c].Up; i != c; i = _nodes[i].Up)
         {
             for (int j = _nodes[i].Left; j != i; j = _nodes[j].Left)
             {
-                _nodes[_nodes[j].ColHeader].Size++;
-                _nodes[_nodes[j].Up].Down = j;
-                _nodes[_nodes[j].Down].Up = j;
+                int col = _nodes[j].ColHeader;
+                _nodes[col].Size++;
+                int u = _nodes[j].Up;
+                int d = _nodes[j].Down;
+                _nodes[u].Down = j;
+                _nodes[d].Up = j;
             }
         }
-        _nodes[_nodes[c].Right].Left = c;
-        _nodes[_nodes[c].Left].Right = c;
+        int rc = _nodes[c].Right;
+        int lc = _nodes[c].Left;
+        _nodes[rc].Left = c;
+        _nodes[lc].Right = c;
     }
 }

@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Numerics;
 using System.Threading.Tasks;
+using System.Runtime.CompilerServices;
 
 class Player
 {
@@ -20,9 +21,9 @@ class Player
     };
 
     static readonly (char id, int f, int r, int R, int C)[] PrecomputedY = new (char, int, int, int, int)[] {
-        ('F',0,1,4,3),('I',0,1,5,1),('H',1,0,2,4),('N',1,0,2,3),('O',0,0,4,0),
-        ('W',0,0,2,0),('P',0,0,1,0),('V',0,2,0,0),('U',0,0,0,1),('L',0,1,0,2),
-        ('J',0,0,0,4),('R',0,3,0,3),('Z',0,1,2,1),('T',0,3,1,2),('X',0,0,3,1)
+      ('F',0,1,4,3),('I',0,1,5,1),('H',1,0,2,4),('N',1,0,2,3),('O',0,0,4,0),
+      ('W',0,0,2,0),('P',0,0,1,0),('V',0,2,0,0),('U',0,0,0,1),('L',0,1,0,2),
+      ('J',0,0,0,4),('R',0,3,0,3),('Z',0,1,2,1),('T',0,3,1,2),('X',0,0,3,1)
     };
 
     class Placement
@@ -274,16 +275,22 @@ public class AlgorithmXSolver<T> where T : notnull
 
         for (int i = 0; i <= numTotalColumns; i++)
         {
-            _nodes[i] = new DlxNode { Left = i, Right = i, Up = i, Down = i, ColHeader = i, Size = 0 };
+            _nodes[i].Left = i;
+            _nodes[i].Right = i;
+            _nodes[i].Up = i;
+            _nodes[i].Down = i;
+            _nodes[i].ColHeader = i;
+            _nodes[i].Size = 0;
         }
 
         _nodes[_header].Right = _header;
         _nodes[_header].Left = _header;
         for (int i = 1; i <= numPrimaryColumns; i++)
         {
-            _nodes[i].Right = _nodes[_header].Right;
+            int r = _nodes[_header].Right;
+            _nodes[i].Right = r;
             _nodes[i].Left = _header;
-            _nodes[_nodes[_header].Right].Left = i;
+            _nodes[r].Left = i;
             _nodes[_header].Right = i;
         }
         _nodeCount = numTotalColumns + 1;
@@ -291,6 +298,18 @@ public class AlgorithmXSolver<T> where T : notnull
 
     public void AddRow(int[] columns, int count, T rowPayload)
     {
+        if (count <= 0) return;
+        for (int i = 1; i < count; i++)
+        {
+            int v = columns[i];
+            int j = i - 1;
+            while (j >= 0 && columns[j] > v) { columns[j + 1] = columns[j]; j--; }
+            columns[j + 1] = v;
+        }
+        int w = 0;
+        for (int i = 0; i < count; i++)
+            if (i == 0 || columns[i] != columns[i - 1]) columns[w++] = columns[i];
+        count = w;
         if (count == 0) return;
 
         int firstNode = -1;
@@ -299,25 +318,27 @@ public class AlgorithmXSolver<T> where T : notnull
             int colHeaderNodeIndex = columns[ci] + 1;
             int newNodeIndex = _nodeCount++;
 
-            _nodes[colHeaderNodeIndex].Size++;
-            _nodes[newNodeIndex].RowPayload = rowPayload;
-            _nodes[newNodeIndex].ColHeader = colHeaderNodeIndex;
+            ref var col = ref _nodes[colHeaderNodeIndex];
+            ref var node = ref _nodes[newNodeIndex];
 
-            _nodes[newNodeIndex].Up = _nodes[colHeaderNodeIndex].Up;
-            _nodes[newNodeIndex].Down = colHeaderNodeIndex;
-            _nodes[_nodes[colHeaderNodeIndex].Up].Down = newNodeIndex;
-            _nodes[colHeaderNodeIndex].Up = newNodeIndex;
+            col.Size++;
+            node.RowPayload = rowPayload;
+            node.ColHeader = colHeaderNodeIndex;
+            node.Up = col.Up;
+            node.Down = colHeaderNodeIndex;
+            _nodes[col.Up].Down = newNodeIndex;
+            col.Up = newNodeIndex;
 
             if (firstNode == -1)
             {
                 firstNode = newNodeIndex;
-                _nodes[newNodeIndex].Left = newNodeIndex;
-                _nodes[newNodeIndex].Right = newNodeIndex;
+                node.Left = newNodeIndex;
+                node.Right = newNodeIndex;
             }
             else
             {
-                _nodes[newNodeIndex].Left = _nodes[firstNode].Left;
-                _nodes[newNodeIndex].Right = firstNode;
+                node.Left = _nodes[firstNode].Left;
+                node.Right = firstNode;
                 _nodes[_nodes[firstNode].Left].Right = newNodeIndex;
                 _nodes[firstNode].Left = newNodeIndex;
             }
@@ -329,7 +350,7 @@ public class AlgorithmXSolver<T> where T : notnull
         return EnumerateSolutions().FirstOrDefault();
     }
 
-    private IEnumerable<T[]> EnumerateSolutions()
+    public IEnumerable<T[]> EnumerateSolutions()
     {
         if (_nodes[_header].Right == _header)
         {
@@ -339,66 +360,79 @@ public class AlgorithmXSolver<T> where T : notnull
             yield break;
         }
         int c = ChooseColumn();
+        if (c == 0)
+            yield break;
+
         Cover(c);
         for (int r_node = _nodes[c].Down; r_node != c; r_node = _nodes[r_node].Down)
         {
             _solution[_solutionDepth++] = _nodes[r_node].RowPayload;
+
             for (int j_node = _nodes[r_node].Right; j_node != r_node; j_node = _nodes[j_node].Right)
-            {
                 Cover(_nodes[j_node].ColHeader);
-            }
+
             foreach (var sol in EnumerateSolutions())
-            {
                 yield return sol;
-            }
+
             _solutionDepth--;
             for (int j_node = _nodes[r_node].Left; j_node != r_node; j_node = _nodes[j_node].Left)
-            {
                 Uncover(_nodes[j_node].ColHeader);
-            }
         }
         Uncover(c);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int ChooseColumn()
     {
         int minSize = int.MaxValue;
         int bestCol = 0;
         for (int c_header = _nodes[_header].Right; c_header != _header; c_header = _nodes[c_header].Right)
         {
-            if (_nodes[c_header].Size < minSize)
+            int s = _nodes[c_header].Size;
+            if (s == 0) return 0;
+            if (s < minSize)
             {
-                minSize = _nodes[c_header].Size;
+                minSize = s;
                 bestCol = c_header;
+                if (s <= 1) break;
             }
         }
         return bestCol;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void Cover(int c)
     {
-        _nodes[_nodes[c].Left].Right = _nodes[c].Right;
-        _nodes[_nodes[c].Right].Left = _nodes[c].Left;
-        for (int i = _nodes[c].Down; i != c; i = _nodes[i].Down)
+        ref var rc = ref _nodes[c];
+        _nodes[_nodes[c].Left].Right = rc.Right;
+        _nodes[_nodes[c].Right].Left = rc.Left;
+
+        for (int i = rc.Down; i != c; i = _nodes[i].Down)
         {
             for (int j = _nodes[i].Right; j != i; j = _nodes[j].Right)
             {
-                _nodes[_nodes[j].Up].Down = _nodes[j].Down;
-                _nodes[_nodes[j].Down].Up = _nodes[j].Up;
+                int u = _nodes[j].Up;
+                int d = _nodes[j].Down;
+                _nodes[u].Down = d;
+                _nodes[d].Up = u;
                 _nodes[_nodes[j].ColHeader].Size--;
             }
         }
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void Uncover(int c)
     {
         for (int i = _nodes[c].Up; i != c; i = _nodes[i].Up)
         {
             for (int j = _nodes[i].Left; j != i; j = _nodes[j].Left)
             {
-                _nodes[_nodes[j].ColHeader].Size++;
-                _nodes[_nodes[j].Up].Down = j;
-                _nodes[_nodes[j].Down].Up = j;
+                int col = _nodes[j].ColHeader;
+                _nodes[col].Size++;
+                int u = _nodes[j].Up;
+                int d = _nodes[j].Down;
+                _nodes[u].Down = j;
+                _nodes[d].Up = j;
             }
         }
         _nodes[_nodes[c].Left].Right = c;

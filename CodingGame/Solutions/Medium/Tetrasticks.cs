@@ -24,7 +24,7 @@ class Player
       ('W',0,0,2,0),('P',0,0,1,0),('V',0,2,0,0),('U',0,0,0,1),('L',0,1,0,2),
       ('J',0,0,0,4),('R',0,3,0,3),('Z',0,1,2,1),('T',0,3,1,2),('X',0,0,3,1)
     };
-    class Placement { public char id; public int f, r, R, C; public ulong Mask, VertMask, VertH, VertV, DblH, DblV; }
+    class Placement { public char id; public int f, r, R, C; public ulong Mask, DblH, DblV; }
     const int ROWS = 6, COLS = 6; const int H_EDGES = ROWS * (COLS - 1), V_EDGES = (ROWS - 1) * COLS; const int EDGE_COUNT = H_EDGES + V_EDGES;
     static readonly List<Placement>[] Placements = new List<Placement>[26];
     static bool FirstTurn = true, GreedyMode = false; static List<Placement> SolutionSequence; static int NextIndex; static readonly long maxSearchTimeMs = 4900;
@@ -42,16 +42,15 @@ class Player
                     for (int R = 0; R + w < ROWS; R++) for (int C = 0; C + h < COLS; C++)
                         {
                             Span<int> hCount = stackalloc int[(ROWS + 1) * (COLS + 1)]; Span<int> vCount = stackalloc int[(ROWS + 1) * (COLS + 1)];
-                            ulong em = 0, vh = 0, vv = 0, vm = 0, dblH = 0, dblV = 0;
+                            ulong em = 0, dblH = 0, dblV = 0;
                             foreach (var s in trans)
                             {
-                                int e = EdgeIndex(s.x + R, s.y + C, s.dx, s.dy); em |= 1UL << e;
+                                em |= 1UL << EdgeIndex(s.x + R, s.y + C, s.dx, s.dy);
                                 int v0 = (R + s.x) * (COLS + 1) + (C + s.y); int v1 = (R + s.x + s.dx) * (COLS + 1) + (C + s.y + s.dy);
-                                vm |= 1UL << v0; vm |= 1UL << v1;
-                                if (s.dx == 0) { vh |= 1UL << v0; vh |= 1UL << v1; if (++hCount[v0] == 2) dblH |= 1UL << v0; if (++hCount[v1] == 2) dblH |= 1UL << v1; }
-                                else { vv |= 1UL << v0; vv |= 1UL << v1; if (++vCount[v0] == 2) dblV |= 1UL << v0; if (++vCount[v1] == 2) dblV |= 1UL << v1; }
+                                if (s.dx == 0) { if (++hCount[v0] == 2) dblH |= 1UL << v0; if (++hCount[v1] == 2) dblH |= 1UL << v1; }
+                                else { if (++vCount[v0] == 2) dblV |= 1UL << v0; if (++vCount[v1] == 2) dblV |= 1UL << v1; }
                             }
-                            list.Add(new Placement { id = id, f = f, r = r, R = R, C = C, Mask = em, VertMask = vm, VertH = vh, VertV = vv, DblH = dblH, DblV = dblV });
+                            list.Add(new Placement { id = id, f = f, r = r, R = R, C = C, Mask = em, DblH = dblH, DblV = dblV });
                         }
                 }
         }
@@ -113,7 +112,7 @@ class Player
                 int maxNodes = 1200000;
                 int maxSolutionDepth = numShapeCols;
 
-                var solver = new AlgorithmXSolver<Placement>(numPrimaryCols, numTotalCols, maxNodes, maxSolutionDepth);
+                var solver = new AlgorithmX<Placement>(numPrimaryCols, numTotalCols, maxNodes, maxSolutionDepth);
 
                 var colBuf = new int[60 + 15 + 49];
                 for (int si = 0; si < numShapeCols; si++)
@@ -128,7 +127,10 @@ class Player
                         {
                             int e = BitOperations.TrailingZeroCount(edgeMask);
                             edgeMask &= edgeMask - 1;
-                            colBuf[colCount++] = edgeToColMap[e];
+                            if (edgeToColMap.TryGetValue(e, out var col))
+                            {
+                                colBuf[colCount++] = col;
+                            }
                         }
                         colBuf[colCount++] = numEdgeCols + si;
                         ulong bends = p.DblH | p.DblV;
@@ -197,10 +199,18 @@ class Player
             }
         }
     }
-
 }
 
-public class AlgorithmXSolver<T> where T : class
+public enum SolverStrategy { Recursive, Iterative }
+
+public readonly record struct AlgorithmXOptions(
+    SolverStrategy Strategy = SolverStrategy.Recursive,
+    bool EarlyAbortOnZeroColumn = true,
+    bool TieBreakStopAtOne = true,
+    bool IncludeAllColumnsInHeader = false
+);
+
+public class AlgorithmX<T> where T : class
 {
     private struct DlxNode
     {
@@ -213,14 +223,20 @@ public class AlgorithmXSolver<T> where T : class
     private readonly DlxNode[] _nodes;
     private readonly int _header;
     private int _nodeCount;
-    private readonly T[] _solution;
+    private readonly T[] _solutionBuffer;
     private int _solutionDepth;
+    private readonly bool _earlyAbortOnZeroColumn;
+    private readonly bool _tieBreakStopAtOne;
 
-    public AlgorithmXSolver(int numPrimaryColumns, int numTotalColumns, int maxNodes, int maxSolutionDepth)
+    public AlgorithmX(int numPrimaryColumns, int numTotalColumns, int maxNodes, int maxSolutionDepth, AlgorithmXOptions? options = null)
     {
+        var opts = options ?? new AlgorithmXOptions();
+        _earlyAbortOnZeroColumn = opts.EarlyAbortOnZeroColumn;
+        _tieBreakStopAtOne = opts.TieBreakStopAtOne;
+
         var poolSize = numTotalColumns + 1 + maxNodes;
         _nodes = new DlxNode[poolSize];
-        _solution = new T[maxSolutionDepth];
+        _solutionBuffer = new T[maxSolutionDepth];
         _header = 0;
 
         for (int i = 0; i <= numTotalColumns; i++)
@@ -232,7 +248,9 @@ public class AlgorithmXSolver<T> where T : class
 
         _nodes[_header].Right = _header;
         _nodes[_header].Left = _header;
-        for (int i = 1; i <= numPrimaryColumns; i++)
+
+        int limit = opts.IncludeAllColumnsInHeader ? numTotalColumns : numPrimaryColumns;
+        for (int i = 1; i <= limit; i++)
         {
             int r = _nodes[_header].Right;
             _nodes[i].Right = r;
@@ -241,13 +259,6 @@ public class AlgorithmXSolver<T> where T : class
             _nodes[_header].Right = i;
         }
         _nodeCount = numTotalColumns + 1;
-    }
-
-    public void AddRow(List<int> columns, T rowPayload)
-    {
-        if (columns == null) return;
-        var colArray = columns.ToArray();
-        AddRow(colArray, colArray.Length, rowPayload);
     }
 
     public void AddRow(int[] columns, int count, T rowPayload)
@@ -305,7 +316,7 @@ public class AlgorithmXSolver<T> where T : class
         if (_nodes[_header].Right == _header)
         {
             var result = new T[_solutionDepth];
-            Array.Copy(_solution, result, _solutionDepth);
+            Array.Copy(_solutionBuffer, result, _solutionDepth);
             onSolutionFound(result);
             return true;
         }
@@ -316,7 +327,7 @@ public class AlgorithmXSolver<T> where T : class
         Cover(c);
         for (int r_node = _nodes[c].Down; r_node != c; r_node = _nodes[r_node].Down)
         {
-            _solution[_solutionDepth++] = _nodes[r_node].RowPayload;
+            _solutionBuffer[_solutionDepth++] = _nodes[r_node].RowPayload;
 
             for (int j_node = _nodes[r_node].Right; j_node != r_node; j_node = _nodes[j_node].Right)
                 Cover(_nodes[j_node].ColHeader);
@@ -340,12 +351,12 @@ public class AlgorithmXSolver<T> where T : class
         for (int c_header = _nodes[_header].Right; c_header != _header; c_header = _nodes[c_header].Right)
         {
             int s = _nodes[c_header].Size;
-            if (s == 0) return 0;
+            if (_earlyAbortOnZeroColumn && s == 0) return 0;
             if (s < minSize)
             {
                 minSize = s;
                 bestCol = c_header;
-                if (s <= 1) break;
+                if (_tieBreakStopAtOne && s <= 1) break;
             }
         }
         return bestCol;

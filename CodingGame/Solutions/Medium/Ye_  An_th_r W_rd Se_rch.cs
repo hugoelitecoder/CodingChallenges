@@ -2,404 +2,281 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
-
-// A single DLX cell, linking in four directions
-class DLXCell
-{
-    public DLXCell PrevX, NextX, PrevY, NextY;
-    public DLXCell ColHeader, RowHeader;
-    public object Title;
-    public int    Size;
-
-    public DLXCell(object title = null)
-    {
-        PrevX = NextX = this;
-        PrevY = NextY = this;
-        ColHeader = RowHeader = null;
-        Title     = title;
-        Size      = 0;
-    }
-
-    public void RemoveX()  { PrevX.NextX = NextX; NextX.PrevX = PrevX; }
-    public void RemoveY()  { PrevY.NextY = NextY; NextY.PrevY = PrevY; }
-    public void RestoreX() { PrevX.NextX = this;  NextX.PrevX = this;  }
-    public void RestoreY() { PrevY.NextY = this;  NextY.PrevY = this;  }
-
-    public void AttachHoriz(DLXCell other)
-    {
-        var n = PrevX;
-        other.PrevX = n;  n.NextX = other;
-        PrevX      = other;  other.NextX = this;
-    }
-
-    public void AttachVert(DLXCell other)
-    {
-        var n = PrevY;
-        other.PrevY = n;  n.NextY = other;
-        PrevY      = other;  other.NextY = this;
-    }
-
-    public void RemoveColumn()
-    {
-        RemoveX();
-        for (var node = NextY; node != this; node = node.NextY)
-            node.RemoveRow();
-    }
-
-    public void RestoreColumn()
-    {
-        for (var node = PrevY; node != this; node = node.PrevY)
-            node.RestoreRow();
-        RestoreX();
-    }
-
-    public void RemoveRow()
-    {
-        for (var node = NextX; node != this; node = node.NextX)
-        {
-            node.ColHeader.Size--;
-            node.RemoveY();
-        }
-    }
-
-    public void RestoreRow()
-    {
-        for (var node = PrevX; node != this; node = node.PrevX)
-        {
-            node.ColHeader.Size++;
-            node.RestoreY();
-        }
-    }
-
-    public void Select()
-    {
-        for (var node = this; ; node = node.NextX)
-        {
-            node.RemoveY();
-            node.ColHeader.RemoveColumn();
-            if (node.NextX == this) break;
-        }
-    }
-
-    public void Unselect()
-    {
-        for (var node = PrevX; node != this; node = node.PrevX)
-        {
-            node.ColHeader.RestoreColumn();
-            node.RestoreY();
-        }
-        ColHeader.RestoreColumn();
-        RestoreY();
-    }
-}
-
-// Basic Algorithm X solver with DLX
-class AlgorithmXSolver
-{
-    private readonly DLXCell _root;
-    private readonly Dictionary<object, DLXCell> _colHeaders;
-    private readonly Dictionary<object, DLXCell> _rowHeaders;
-    private readonly Dictionary<object, List<object>> _actions;
-    private readonly HashSet<object> _optionals;
-    protected readonly List<object> solution = new();
-    public  int SolutionCount { get; private set; }
-    private readonly List<HashSet<object>> _history = new() { new() };
-    protected bool solutionIsValid = true;
-
-    public AlgorithmXSolver(
-        List<object> requirements,
-        Dictionary<object, List<object>> actions,
-        List<object> optionals = null
-    )
-    {
-        _actions   = actions;
-        _optionals = optionals is null ? new() : new(optionals);
-
-        // create root header
-        _root = new DLXCell("root") { Size = int.MaxValue };
-
-        // create column headers
-        _colHeaders = new();
-        foreach (var r in requirements)
-        {
-            var ch = new DLXCell(r);
-            _colHeaders[r] = ch;
-            _root.AttachHoriz(ch);
-        }
-
-        // create row headers
-        _rowHeaders = new();
-        foreach (var a in actions.Keys)
-            _rowHeaders[a] = new DLXCell(a);
-
-        // build matrix rows
-        foreach (var action in actions.Keys)
-        {
-            DLXCell prev = null;
-            foreach (var req in actions[action])
-            {
-                var cell = new DLXCell();
-                cell.ColHeader = _colHeaders[req];
-                cell.RowHeader = _rowHeaders[action];
-                cell.ColHeader.AttachVert(cell);
-                cell.ColHeader.Size++;
-                if (prev != null)
-                    prev.AttachHoriz(cell);
-                prev = cell;
-            }
-        }
-    }
-
-    // The main recursive solver, yielding each complete solution
-    public IEnumerable<List<object>> Solve()
-    {
-        // 1) Choose column with fewest rows (excluding optionals)
-        DLXCell best = _root;
-        int    bestSize = int.MaxValue;
-        for (var c = _root.NextX; c != _root; c = c.NextX)
-        {
-            if (!_optionals.Contains(c.Title))
-            {
-                var sz = RequirementSortCriteria(c);
-                if (best == _root || sz < bestSize)
-                {
-                    best     = c;
-                    bestSize = sz;
-                }
-            }
-        }
-
-        if (best == _root)
-        {
-            // no columns left: record solution
-            ProcessSolution();
-            if (solutionIsValid)
-            {
-                SolutionCount++;
-                yield return new List<object>(solution);
-            }
-        }
-        else
-        {
-            // 2) Cover each row in that column
-            var rows = new List<DLXCell>();
-            for (var r = best.NextY; r != best; r = r.NextY)
-                rows.Add(r);
-
-            // push history
-            _history.Add(new HashSet<object>(_history[^1]));
-
-            // try each row
-            foreach (var row in rows.OrderBy(r => ActionSortCriteria(r.RowHeader)))
-            {
-                Select(row);
-                if (solutionIsValid)
-                {
-                    foreach (var sol in Solve())
-                        yield return sol;
-                }
-                Deselect(row);
-                solutionIsValid = true;
-            }
-
-            _history.RemoveAt(_history.Count - 1);
-        }
-    }
-
-    private void Select(DLXCell rowNode)
-    {
-        rowNode.Select();
-        var act = rowNode.RowHeader.Title;
-        solution.Add(act);
-        ProcessRowSelection(act);
-    }
-
-    private void Deselect(DLXCell rowNode)
-    {
-        rowNode.Unselect();
-        var act = rowNode.RowHeader.Title;
-        solution.RemoveAt(solution.Count - 1);
-        ProcessRowDeselection(act);
-    }
-
-    // Hooks for subclasses:
-    protected virtual void ProcessSolution() {}
-    protected virtual void ProcessRowSelection(object action) {}
-    protected virtual void ProcessRowDeselection(object action) {}
-    protected virtual int RequirementSortCriteria(DLXCell col) => col.Size;
-    protected virtual int ActionSortCriteria(DLXCell row)    => 0;
-}
-
-// A concrete solver for the "Yet Another Word Search" problem
-class YetAnotherWordSearchSolver : AlgorithmXSolver
-{
-    private readonly int _height, _width;
-    private readonly char[][] _grid;
-    private readonly Dictionary<(int, int), List<char>> _locationColors;
-    public static readonly Dictionary<string, (int dr, int dc)> DELTAS =
-        new()
-        {
-            ["horizontal"] = (0, 1),
-            ["vertical"]   = (1, 0),
-            ["up_diag"]    = (-1, 1),
-            ["down_diag"]  = (1, 1)
-        };
-
-    public YetAnotherWordSearchSolver(string[] words, char[][] grid)
-        : base(BuildRequirements(words), BuildActions(words, grid))
-    {
-        _grid = grid;
-        _height = grid.Length;
-        _width  = grid[0].Length;
-        _locationColors = new Dictionary<(int,int), List<char>>();
-        for (int r = 0; r < _height; r++)
-            for (int c = 0; c < _width; c++)
-                _locationColors[(r, c)] = new List<char>();
-    }
-
-    // Build the "must-place" requirements
-    private static List<object> BuildRequirements(string[] words) =>
-        words.Select(w => (object) (ValueTuple.Create("word placed", w)))
-             .ToList();
-
-    // Build the actions for every valid placement
-    private static Dictionary<object, List<object>> BuildActions(string[] words, char[][] grid)
-    {
-        int h = grid.Length, w = grid[0].Length;
-        var actions = new Dictionary<object, List<object>>();
-
-        foreach (var word in words)
-        {
-            int len = word.Length;
-            foreach (var orientation in DELTAS.Keys)
-            {
-                var (dr, dc) = DELTAS[orientation];
-                for (int row = 0; row < h; row++)
-                for (int col = 0; col < w; col++)
-                {
-                    // does word fit?
-                    if (row + dr * (len - 1) < 0
-                        || row + dr * (len - 1) >= h
-                        || col + dc * (len - 1) < 0
-                        || col + dc * (len - 1) >= w)
-                        continue;
-
-                    foreach (var fb in new[] { "forward", "backward" })
-                    {
-                        var wstr = fb == "forward"
-                            ? word
-                            : new string(word.Reverse().ToArray());
-                        int rr = row, cc = col;
-                        var ok = true;
-                        foreach (var ch in wstr)
-                        {
-                            if (grid[rr][cc] != '.' && grid[rr][cc] != ch)
-                            {
-                                ok = false;
-                                break;
-                            }
-                            rr += dr; cc += dc;
-                        }
-                        if (!ok) continue;
-
-                        var action = ValueTuple.Create("place word", word, row, col, orientation, fb);
-                        var req    = ValueTuple.Create("word placed", word);
-                        actions[action] = new List<object> { req };
-                    }
-                }
-            }
-        }
-
-        return actions;
-    }
-
-    protected override void ProcessRowSelection(object actionObj)
-    {
-        var action = ((string, string, int, int, string, string))actionObj;
-        var word   = action.Item2;
-        if (action.Item6 == "backward")
-            word = new string(word.Reverse().ToArray());
-
-        var (dr, dc) = DELTAS[action.Item5];
-        int r = action.Item3, c = action.Item4;
-        foreach (var ch in word)
-        {
-            var lst = _locationColors[(r, c)];
-            if (lst.Count > 0 && lst[^1] != ch)
-                solutionIsValid = false;
-            lst.Add(ch);
-            r += dr; c += dc;
-        }
-    }
-
-    protected override void ProcessRowDeselection(object actionObj)
-    {
-        var action = ((string, string, int, int, string, string))actionObj;
-        var word   = action.Item2;
-        if (action.Item6 == "backward")
-            word = new string(word.Reverse().ToArray());
-
-        var (dr, dc) = DELTAS[action.Item5];
-        int r = action.Item3, c = action.Item4;
-        for (int i = 0; i < word.Length; i++)
-        {
-            var lst = _locationColors[(r, c)];
-            lst.RemoveAt(lst.Count - 1);
-            r += dr; c += dc;
-        }
-    }
-}
+using System.Runtime.CompilerServices;
 
 class Program
 {
     static void Main()
     {
         var dims = Console.ReadLine()!.Split();
-        int height = int.Parse(dims[0]),
-            width  = int.Parse(dims[1]);
-
+        int height = int.Parse(dims[0]), width = int.Parse(dims[1]);
         var grid = new char[height][];
-        for (int i = 0; i < height; i++)
-            grid[i] = Console.ReadLine()!.ToCharArray();
-
+        for (int i = 0; i < height; i++) grid[i] = Console.ReadLine()!.ToCharArray();
         var words = Console.ReadLine()!.Split();
 
-        // prepare output canvas
-        var answer = Enumerable.Range(0, height)
-            .Select(_ => new string(' ', width).ToCharArray())
-            .ToArray();
+        var answer = new char[height][];
+        for (int i = 0; i < height; i++) answer[i] = new string(' ', width).ToCharArray();
 
-        var solver = new YetAnotherWordSearchSolver(words, grid);
-        var sw     = Stopwatch.StartNew();
+        var solver = new CrossWordPuzzleSolver(words, grid);
+        var sw = Stopwatch.StartNew();
 
-        // take first solution
-        foreach (var sol in solver.Solve())
+        var solution = solver.Solve();
+        if (solution != null)
         {
-            foreach (var actionObj in sol)
+            foreach (var placement in solution)
             {
-                var action = ((string, string, int, int, string, string))actionObj;
-                var word   = action.Item2;
-                if (action.Item6 == "backward")
-                    word = new string(word.Reverse().ToArray());
-
-                var (dr, dc) = YetAnotherWordSearchSolver.DELTAS[action.Item5];
-                int r = action.Item3, c = action.Item4;
+                var word = placement.Direction == "backward" ? new string(placement.Word.Reverse().ToArray()) : placement.Word;
+                var (dr, dc) = CrossWordPuzzleSolver.DELTAS[placement.Orientation];
+                int r = placement.Row, c = placement.Col;
                 foreach (var ch in word)
                 {
                     answer[r][c] = ch;
                     r += dr; c += dc;
                 }
             }
-            break;
         }
-
         sw.Stop();
 
-        // print final grid
         foreach (var row in answer)
             Console.WriteLine(new string(row));
 
-        // timing to stderr
-        Console.Error.WriteLine($"{sw.ElapsedMilliseconds} ms");
+        Console.Error.WriteLine($"[DEBUG] Solved in {sw.ElapsedMilliseconds} ms");
     }
 }
+
+public record Placement(string Word, int Row, int Col, string Orientation, string Direction);
+
+class CrossWordPuzzleSolver : ISolverObserver<Placement>
+{
+    private readonly AlgorithmXSolver<Placement> _solver;
+    private bool _solutionIsValid = true;
+    private readonly Dictionary<(int, int), List<char>> _locationColors;
+
+    public static readonly Dictionary<string, (int dr, int dc)> DELTAS = new()
+    {
+        ["horizontal"] = (0, 1),
+        ["vertical"] = (1, 0),
+        ["up_diag"] = (-1, 1),
+        ["down_diag"] = (1, 1)
+    };
+
+    public CrossWordPuzzleSolver(string[] words, char[][] grid)
+    {
+        int height = grid.Length;
+        int width = grid[0].Length;
+        _locationColors = new Dictionary<(int, int), List<char>>();
+        for (int r = 0; r < height; r++)
+            for (int c = 0; c < width; c++)
+                _locationColors[(r, c)] = new List<char>();
+
+        var wordToCol = words.Select((w, i) => (w, i)).ToDictionary(p => p.w, p => p.i);
+        int maxNodes = 0;
+        var rowsToAdd = new List<(Placement payload, int[] cols)>();
+
+        foreach (var word in words)
+        {
+            foreach (var orientation in DELTAS.Keys)
+            {
+                var (dr, dc) = DELTAS[orientation];
+                for (int row = 0; row < height; row++)
+                    for (int col = 0; col < width; col++)
+                    {
+                        if (row + dr * (word.Length - 1) < 0 || row + dr * (word.Length - 1) >= height ||
+                            col + dc * (word.Length - 1) < 0 || col + dc * (word.Length - 1) >= width)
+                            continue;
+
+                        foreach (var fb in new[] { "forward", "backward" })
+                        {
+                            var wstr = fb == "forward" ? word : new string(word.Reverse().ToArray());
+                            bool ok = true;
+                            int rr = row, cc = col;
+                            foreach (var ch in wstr)
+                            {
+                                if (grid[rr][cc] != '.' && grid[rr][cc] != ch) { ok = false; break; }
+                                rr += dr; cc += dc;
+                            }
+                            if (ok)
+                            {
+                                var payload = new Placement(word, row, col, orientation, fb);
+                                rowsToAdd.Add((payload, new[] { wordToCol[word] }));
+                                maxNodes++;
+                            }
+                        }
+                    }
+            }
+        }
+
+        _solver = new AlgorithmXSolver<Placement>(words.Length, words.Length, maxNodes, words.Length, observer: this);
+
+        foreach (var row in rowsToAdd)
+        {
+            _solver.AddRow(row.cols, row.cols.Length, row.payload);
+        }
+    }
+
+    public Placement[] Solve() => _solver.Solve();
+    public bool IsSolutionValid() => _solutionIsValid;
+
+    public void OnRowSelected(Placement placement)
+    {
+        _solutionIsValid = true;
+        var word = placement.Direction == "backward" ? new string(placement.Word.Reverse().ToArray()) : placement.Word;
+        var (dr, dc) = DELTAS[placement.Orientation];
+        int r = placement.Row, c = placement.Col;
+        foreach (var ch in word)
+        {
+            var lst = _locationColors[(r, c)];
+            if (lst.Count > 0 && lst.Last() != ch)
+            {
+                _solutionIsValid = false;
+            }
+            lst.Add(ch);
+            r += dr; c += dc;
+        }
+    }
+
+    public void OnRowDeselected(Placement placement)
+    {
+        var word = placement.Direction == "backward" ? new string(placement.Word.Reverse().ToArray()) : placement.Word;
+        var (dr, dc) = DELTAS[placement.Orientation];
+        int r = placement.Row, c = placement.Col;
+        for (int i = 0; i < word.Length; i++)
+        {
+            _locationColors[(r, c)].RemoveAt(_locationColors[(r, c)].Count - 1);
+            r += dr; c += dc;
+        }
+    }
+}
+
+#region Algorithm X
+
+public enum SolverStrategy { FindFirst, FindAll }
+
+public readonly record struct AlgorithmXOptions(
+    SolverStrategy Strategy = SolverStrategy.FindFirst,
+    bool SortAndDedupRow = false,
+    bool EarlyAbortOnZeroColumn = true,
+    bool TieBreakStopAtOne = true,
+    bool IncludeAllColumnsInHeader = false
+);
+
+public interface ISolverObserver<T> where T : class
+{
+    void OnRowSelected(T rowPayload);
+    void OnRowDeselected(T rowPayload);
+    bool IsSolutionValid();
+}
+
+public class AlgorithmXSolver<T> where T : class
+{
+    private struct DlxNode { public int Left, Right, Up, Down, ColHeader; public T RowPayload; public int Size; }
+
+    private readonly DlxNode[] _nodes;
+    private readonly int _header;
+    private int _nodeCount;
+    private readonly T[] _solutionBuffer;
+    private int _solutionDepth;
+    private readonly ISolverObserver<T> _observer;
+    private readonly bool _earlyAbortOnZeroColumn, _tieBreakStopAtOne, _sortAndDedupRow;
+
+    public AlgorithmXSolver(int numPrimaryColumns, int numTotalColumns, int maxNodes, int maxSolutionDepth, AlgorithmXOptions options = default, ISolverObserver<T> observer = null)
+    {
+        _observer = observer;
+        _sortAndDedupRow = options.SortAndDedupRow;
+        _earlyAbortOnZeroColumn = options.EarlyAbortOnZeroColumn;
+        _tieBreakStopAtOne = options.TieBreakStopAtOne;
+        var poolSize = numTotalColumns + 1 + maxNodes;
+        _nodes = new DlxNode[poolSize];
+        _solutionBuffer = new T[maxSolutionDepth];
+        _header = 0;
+        for (int i = 0; i <= numTotalColumns; i++)
+        {
+            _nodes[i].Left = i; _nodes[i].Right = i; _nodes[i].Up = i; _nodes[i].Down = i;
+            _nodes[i].ColHeader = i; _nodes[i].Size = 0;
+        }
+        _nodes[_header].Right = _header; _nodes[_header].Left = _header;
+        int limit = options.IncludeAllColumnsInHeader ? numTotalColumns : numPrimaryColumns;
+        for (int i = 1; i <= limit; i++)
+        {
+            int r = _nodes[_header].Right;
+            _nodes[i].Right = r; _nodes[i].Left = _header; _nodes[r].Left = i; _nodes[_header].Right = i;
+        }
+        _nodeCount = numTotalColumns + 1;
+    }
+
+    public void AddRow(int[] columns, int count, T rowPayload)
+    {
+        if (count <= 0) return;
+        if (_sortAndDedupRow) { Array.Sort(columns, 0, count); int w = 1; for (int i = 1; i < count; i++) if (columns[i] != columns[i - 1]) columns[w++] = columns[i]; count = w; }
+        int firstNode = -1;
+        for (int ci = 0; ci < count; ci++)
+        {
+            int colHeaderNodeIndex = columns[ci] + 1;
+            int newNodeIndex = _nodeCount++;
+            ref var col = ref _nodes[colHeaderNodeIndex]; ref var node = ref _nodes[newNodeIndex];
+            col.Size++;
+            node.RowPayload = rowPayload; node.ColHeader = colHeaderNodeIndex;
+            node.Up = col.Up; node.Down = colHeaderNodeIndex; _nodes[col.Up].Down = newNodeIndex; col.Up = newNodeIndex;
+            if (firstNode == -1) { firstNode = newNodeIndex; node.Left = newNodeIndex; node.Right = newNodeIndex; }
+            else { node.Left = _nodes[firstNode].Left; node.Right = firstNode; _nodes[_nodes[firstNode].Left].Right = newNodeIndex; _nodes[firstNode].Left = newNodeIndex; }
+        }
+    }
+
+    public T[] Solve() { T[] firstSolution = null; SearchFindFirst(sol => { firstSolution = sol; }); return firstSolution; }
+
+    private bool SearchFindFirst(Action<T[]> onSolutionFound)
+    {
+        if (_nodes[_header].Right == _header)
+        {
+            var result = new T[_solutionDepth]; Array.Copy(_solutionBuffer, result, _solutionDepth);
+            onSolutionFound(result); return true;
+        }
+        int c = ChooseColumn(); if (_earlyAbortOnZeroColumn && c == 0) return false;
+        Cover(c);
+        for (int r_node = _nodes[c].Down; r_node != c; r_node = _nodes[r_node].Down)
+        {
+            var payload = _nodes[r_node].RowPayload;
+            _solutionBuffer[_solutionDepth++] = payload;
+            _observer?.OnRowSelected(payload);
+
+            for (int j_node = _nodes[r_node].Right; j_node != r_node; j_node = _nodes[j_node].Right) Cover(_nodes[j_node].ColHeader);
+
+            if ((_observer == null || _observer.IsSolutionValid()) && SearchFindFirst(onSolutionFound)) return true;
+
+            _solutionDepth--;
+            _observer?.OnRowDeselected(payload);
+
+            for (int j_node = _nodes[r_node].Left; j_node != r_node; j_node = _nodes[j_node].Left) Uncover(_nodes[j_node].ColHeader);
+        }
+        Uncover(c); return false;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int ChooseColumn()
+    {
+        int minSize = int.MaxValue, bestCol = 0;
+        for (int c_header = _nodes[_header].Right; c_header != _header; c_header = _nodes[c_header].Right)
+        {
+            int s = _nodes[c_header].Size; if (_earlyAbortOnZeroColumn && s == 0) return 0;
+            if (s < minSize) { minSize = s; bestCol = c_header; if (_tieBreakStopAtOne && s <= 1) break; }
+        }
+        return bestCol;
+    }
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void Cover(int c)
+    {
+        ref var rc = ref _nodes[c]; _nodes[rc.Left].Right = rc.Right; _nodes[rc.Right].Left = rc.Left;
+        for (int i = rc.Down; i != c; i = _nodes[i].Down) for (int j = _nodes[i].Right; j != i; j = _nodes[j].Right)
+            { ref var nodeJ = ref _nodes[j]; _nodes[nodeJ.Up].Down = nodeJ.Down; _nodes[nodeJ.Down].Up = nodeJ.Up; _nodes[nodeJ.ColHeader].Size--; }
+    }
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void Uncover(int c)
+    {
+        ref var rc = ref _nodes[c];
+        for (int i = rc.Up; i != c; i = _nodes[i].Up) for (int j = _nodes[i].Left; j != i; j = _nodes[j].Left)
+            { ref var nodeJ = ref _nodes[j]; _nodes[nodeJ.ColHeader].Size++; _nodes[nodeJ.Up].Down = j; _nodes[nodeJ.Down].Up = j; }
+        _nodes[rc.Left].Right = c; _nodes[rc.Right].Left = c;
+    }
+}
+
+#endregion

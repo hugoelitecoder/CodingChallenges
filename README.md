@@ -3,9 +3,9 @@
 Please give this repository a ⭐ (star) if this helped you progress in your rank.... </br>
 
 
-<a href="https://www.codingame.com">
+<p href="https://www.codingame.com">
   <img src="https://raw.githubusercontent.com/hugoelitecoder/CodingChallenges/main/CodingGame/Images/CodingGameLogo.png" alt="CodingGame Logo" width="200"/>
-</a>
+</p>
 
 <a href="https://www.codingame.com/profile/7489c8e2d2f5c35b36cc1a4ef0fde6749950261">
     <img src="https://img.shields.io/badge/CodinGame-Profile-yellow?style=for-the-badge&logo=codingame&logoColor=black" />

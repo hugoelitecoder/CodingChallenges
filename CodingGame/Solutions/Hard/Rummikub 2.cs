@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Diagnostics;
 
 public class Program
 {
@@ -16,18 +17,20 @@ public class Program
             rows.Add((Console.ReadLine() ?? "").Trim().Split(' '));
         }
 
+        var stopwatch = Stopwatch.StartNew();
         var table = new Table(rows);
         var solver = new RummikubSolver();
-
         var bestSolution = solver.Solve(table, goalTile);
+        stopwatch.Stop();
+        Console.Error.WriteLine($"[DEBUG] Total execution time: {stopwatch.ElapsedMilliseconds} ms");
 
         if (bestSolution != null)
         {
             var bestActions = bestSolution.Item2;
             var bestTable = bestSolution.Item1;
-            
+
             var sb = new StringBuilder();
-            foreach(var action in bestActions)
+            foreach (var action in bestActions)
             {
                 sb.AppendLine(action.ToString());
             }
@@ -82,19 +85,58 @@ public class Action
 
 public class RummikubSolver
 {
+    private readonly Dictionary<string, List<Tuple<Table, List<Action>>>> _addTileCache = new Dictionary<string, List<Tuple<Table, List<Action>>>>();
+    private readonly Dictionary<string, List<Tuple<Table, List<Action>>>> _findTileCache = new Dictionary<string, List<Tuple<Table, List<Action>>>>();
+
+    private string GetCacheKey(Table table, Tile tile, IReadOnlyDictionary<int, int> forbiddenRows)
+    {
+        var sb = new StringBuilder();
+
+        // Part 1: The tile being manipulated
+        sb.Append(tile.GetName()).Append('|');
+
+        // Part 2: The forbidden rows, sorted for canonical key representation
+        var forbiddenKeys = forbiddenRows.Keys.OrderBy(k => k);
+        foreach (var key in forbiddenKeys)
+        {
+            sb.Append(key).Append(',');
+        }
+        sb.Append('|');
+
+        // Part 3: The state of the table, with rows sorted by ID for a canonical key
+        var rowKeys = table.GetRows().Keys.OrderBy(k => k);
+        foreach (var key in rowKeys)
+        {
+            sb.Append(key).Append(':').Append(table.GetRow(key).GetDisplay()).Append(';');
+        }
+        return sb.ToString();
+    }
+
+    private List<Tuple<Table, List<Action>>> CloneSolutions(IEnumerable<Tuple<Table, List<Action>>> solutions)
+    {
+        var clonedList = new List<Tuple<Table, List<Action>>>();
+        foreach (var solution in solutions)
+        {
+            // Table needs a deep clone to ensure state isolation between search paths.
+            // Action objects are immutable, so a new list wrapper is sufficient.
+            clonedList.Add(Tuple.Create(solution.Item1.Clone(), new List<Action>(solution.Item2)));
+        }
+        return clonedList;
+    }
+
     public Tuple<Table, List<Action>> Solve(Table initialTable, Tile goalTile)
     {
         var allSolutions = AddTile(initialTable, goalTile, new Dictionary<int, int>());
         return FindBestSolution(allSolutions);
     }
-    
+
     private Tuple<Table, List<Action>> FindBestSolution(List<Tuple<Table, List<Action>>> solutions)
     {
         int bestCount = int.MaxValue;
         int bestFirstCombine = int.MaxValue;
         List<Action> bestActions = null;
         Table bestTable = null;
-        
+
         int bestCombineR1 = 0;
         int bestCombineR2 = 0;
 
@@ -119,7 +161,7 @@ public class RummikubSolver
                     var a3Row = actions[indexCombine - 1].RowID1;
 
                     bool disjoint = (combineAction.RowID1 != a2Row) && (combineAction.RowID2 != a2Row) &&
-                                    (combineAction.RowID1 != a3Row) && (combineAction.RowID2 != a3Row);
+                            (combineAction.RowID1 != a3Row) && (combineAction.RowID2 != a3Row);
 
                     if (!disjoint) break;
 
@@ -128,14 +170,14 @@ public class RummikubSolver
                     actions[indexCombine - 2] = combineAction;
                     actions[indexCombine - 1] = prev2;
                     actions[indexCombine] = prev1;
-                    
+
                     indexCombine -= 2;
                 }
                 firstCombine = Math.Min(firstCombine, indexCombine);
             }
 
             if (count > bestCount) continue;
-            
+
             if (count == bestCount)
             {
                 if (firstCombine > bestFirstCombine) continue;
@@ -170,6 +212,12 @@ public class RummikubSolver
 
     public List<Tuple<Table, List<Action>>> AddTile(Table tableInitial, Tile tile, Dictionary<int, int> forbiddenRows)
     {
+        string cacheKey = GetCacheKey(tableInitial, tile, forbiddenRows);
+        if (_addTileCache.TryGetValue(cacheKey, out var cachedResult))
+        {
+            return CloneSolutions(cachedResult);
+        }
+
         var solvedSeries = new List<Tuple<Table, List<Action>>>();
         foreach (var kv in tableInitial.GetRows())
         {
@@ -202,8 +250,8 @@ public class RummikubSolver
 
                 var row = rows[rowID];
                 var could = row is Set set ? set.CouldInsert(tile)
-                          : row is Run run ? run.CouldInsert(tile)
-                          : new List<Tuple<ManipulationMethod, Tile>>();
+                     : row is Run run ? run.CouldInsert(tile)
+                     : new List<Tuple<ManipulationMethod, Tile>>();
 
                 foreach (var step in could)
                 {
@@ -270,11 +318,18 @@ public class RummikubSolver
             }
         }
 
+        _addTileCache[cacheKey] = CloneSolutions(solvedSeries);
         return solvedSeries;
     }
 
     public List<Tuple<Table, List<Action>>> FindTile(Table tableInitial, Tile tile, Dictionary<int, int> forbiddenRows)
     {
+        string cacheKey = GetCacheKey(tableInitial, tile, forbiddenRows);
+        if (_findTileCache.TryGetValue(cacheKey, out var cachedResult))
+        {
+            return CloneSolutions(cachedResult);
+        }
+
         var solvedSeries = new List<Tuple<Table, List<Action>>>();
         foreach (var kv in tableInitial.GetRows())
         {
@@ -306,8 +361,8 @@ public class RummikubSolver
 
                 var row = rows[rowID];
                 var could = row is Set set ? set.CouldTake(tile)
-                          : row is Run run ? run.CouldTake(tile)
-                          : new List<Tuple<ManipulationMethod, Tile>>();
+                     : row is Run run ? run.CouldTake(tile)
+                     : new List<Tuple<ManipulationMethod, Tile>>();
 
                 foreach (var step in could)
                 {
@@ -374,6 +429,7 @@ public class RummikubSolver
             }
         }
 
+        _findTileCache[cacheKey] = CloneSolutions(solvedSeries);
         return solvedSeries;
     }
 
@@ -587,14 +643,14 @@ public class Set : Row
             Tiles[tile.GetName()] = tile;
         }
     }
-    
+
     public Set(Set other)
     {
         this.Type = RowType.Set;
         this.HasJoker = other.HasJoker;
         this.Value = other.Value;
         this.Tiles = new Dictionary<string, Tile>(other.Tiles.Count);
-        foreach(var kvp in other.Tiles)
+        foreach (var kvp in other.Tiles)
         {
             this.Tiles.Add(kvp.Key, new Tile(kvp.Value));
         }
@@ -614,7 +670,7 @@ public class Set : Row
         if (HasJoker) output.Add("J");
         return string.Join(" ", output);
     }
-    
+
     public List<Tuple<ManipulationMethod, Tile>> CouldInsert(Tile tile)
     {
         var list = new List<Tuple<ManipulationMethod, Tile>>();
@@ -695,7 +751,7 @@ public class Run : Row
             Max = Math.Max(Max, tile.Value ?? Max);
         }
     }
-    
+
     public Run(Run other)
     {
         this.Type = RowType.Run;
@@ -715,7 +771,7 @@ public class Run : Row
     public override Row Clone() => new Run(this);
     public override int GetCount() => tileList.Count + (HasJoker ? 1 : 0);
     public IEnumerable<Tile> GetTiles() => tileList;
-    
+
     private Run() { Type = RowType.Run; }
     public override string GetDisplay()
     {
@@ -800,7 +856,7 @@ public class Run : Row
         if ((tile.Value ?? int.MaxValue) > Max + 1) tiles.Add(Tuple.Create(ManipulationMethod.Find, new Tile($"{Max + 1}{Tile.ColorToString(tile.Color)}")));
 
         if (tile.Value.HasValue && tile.Value.Value >= Min && tile.Value.Value <= Max &&
-            Math.Min(2, tile.Value.Value - Min) + Math.Min(2, Max - tile.Value.Value) + (HasJoker ? 1 : 0) < 4)
+          Math.Min(2, tile.Value.Value - Min) + Math.Min(2, Max - tile.Value.Value) + (HasJoker ? 1 : 0) < 4)
         {
             int lo = Math.Max(3, Math.Max(tile.Value.Value - (HasJoker ? 2 : 1), Min));
             int hi = Math.Min(11, Math.Min(tile.Value.Value + (HasJoker ? 2 : 1), Max));
@@ -916,7 +972,7 @@ public class Table
         }
     }
 
-    private Table() {} 
+    private Table() { }
     public Table Clone()
     {
         var t = new Table { nextRow = this.nextRow };
@@ -927,7 +983,7 @@ public class Table
         }
         return t;
     }
-    
+
     public IReadOnlyDictionary<int, Row> GetRows() => rows;
     public Row GetRow(int rowID) => rows.TryGetValue(rowID, out var row) ? row : null;
 
@@ -1008,7 +1064,7 @@ public class Table
                     result.Add(rowID);
                 }
                 else if ((tile.Value ?? int.MinValue) > run.Min && (tile.Value ?? int.MaxValue) < run.Max &&
-                         (Math.Min((tile.Value ?? 0) - run.Min, 2) + Math.Min(run.Max - (tile.Value ?? 0), 2) + (run.HasJoker ? 1 : 0) == 4))
+                    (Math.Min((tile.Value ?? 0) - run.Min, 2) + Math.Min(run.Max - (tile.Value ?? 0), 2) + (run.HasJoker ? 1 : 0) == 4))
                 {
                     var tilesRemoved = new List<Tile>();
                     while (run.Max >= (tile.Value ?? 0))
@@ -1091,8 +1147,8 @@ public class Table
                 return true;
             }
             else if (row.GetCount() >= 7 &&
-                     (tile.Value ?? 0) - 3 >= run2.Min &&
-                     (tile.Value ?? 0) + 3 <= run2.Max)
+                (tile.Value ?? 0) - 3 >= run2.Min &&
+                (tile.Value ?? 0) + 3 <= run2.Max)
             {
                 var tiles = new List<Tile>();
                 while (run2.Max > (tile.Value ?? 0)) tiles.Add(run2.RemoveEnd());
@@ -1126,11 +1182,11 @@ public class Tile
 
         char lastChar = tileStr[tileStr.Length - 1];
         string valueStr = tileStr.Substring(0, tileStr.Length - 1);
-        
+
         Value = int.Parse(valueStr);
         Color = StringToColor(lastChar.ToString());
     }
-    
+
     public Tile(Tile other)
     {
         this.Value = other.Value;

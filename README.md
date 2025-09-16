@@ -2,6 +2,7 @@
 # CodingChallenges
 Please give this repository a ⭐ (star) if this helped you progress in your rank.... </br>
 
+---
 
 <p href="https://www.codingame.com">
   <img src="https://raw.githubusercontent.com/hugoelitecoder/CodingChallenges/main/CodingGame/Images/CodinGameLogo.png" alt="CodingGame Logo" width="200"/>
@@ -18,6 +19,8 @@ Please give this repository a ⭐ (star) if this helped you progress in your ran
 [![](https://img.shields.io/github/directory-file-count/hugoelitecoder/CodingChallenges/CodingGame/Solutions/Optim?label=Optim&color=blue)](https://github.com/hugoelitecoder/CodingChallenges/tree/main/CodingGame/Solutions/Optim)
 [![](https://img.shields.io/github/directory-file-count/hugoelitecoder/CodingChallenges/CodingGame/Solutions/Bots?label=Bots&color=black)](https://github.com/hugoelitecoder/CodingChallenges/tree/main/CodingGame/Solutions/Bots)
 
+---
+
 <p>
   <img src="https://raw.githubusercontent.com/hugoelitecoder/CodingChallenges/main/LeetCode/Images/LeetCodeLogo.png" alt="LeetCode Logo" width="200"/>
 </p>
@@ -26,7 +29,9 @@ Please give this repository a ⭐ (star) if this helped you progress in your ran
     <img src="https://img.shields.io/badge/LeetCode-Profile-orange?style=for-the-badge&logo=leetcode&logoColor=white" />
 </a>
 
-
+### 🔎 Problems Solved
 [![LeetCode Stats](https://leetcode-stats.vercel.app/api?username=hugoelitecoder&theme=dark)](https://leetcode.com/u/hugoelitecoder/)
+
+---
 
 

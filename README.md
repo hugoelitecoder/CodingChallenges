@@ -27,5 +27,6 @@ Please give this repository a ⭐ (star) if this helped you progress in your ran
 </a>
 
 
+[![LeetCode Stats](https://leetcode-stats.vercel.app/api?username=hugoelitecoder&theme=dark)](https://leetcode.com/u/hugoelitecoder/)
 
 

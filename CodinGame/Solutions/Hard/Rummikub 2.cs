@@ -91,19 +91,13 @@ public class RummikubSolver
     private string GetCacheKey(Table table, Tile tile, IReadOnlyDictionary<int, int> forbiddenRows)
     {
         var sb = new StringBuilder();
-
-        // Part 1: The tile being manipulated
         sb.Append(tile.GetName()).Append('|');
-
-        // Part 2: The forbidden rows, sorted for canonical key representation
         var forbiddenKeys = forbiddenRows.Keys.OrderBy(k => k);
         foreach (var key in forbiddenKeys)
         {
             sb.Append(key).Append(',');
         }
         sb.Append('|');
-
-        // Part 3: The state of the table, with rows sorted by ID for a canonical key
         var rowKeys = table.GetRows().Keys.OrderBy(k => k);
         foreach (var key in rowKeys)
         {
@@ -117,8 +111,6 @@ public class RummikubSolver
         var clonedList = new List<Tuple<Table, List<Action>>>();
         foreach (var solution in solutions)
         {
-            // Table needs a deep clone to ensure state isolation between search paths.
-            // Action objects are immutable, so a new list wrapper is sufficient.
             clonedList.Add(Tuple.Create(solution.Item1.Clone(), new List<Action>(solution.Item2)));
         }
         return clonedList;

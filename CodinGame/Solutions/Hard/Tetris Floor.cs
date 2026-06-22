@@ -9,7 +9,6 @@ public class Solution
     public static void Main()
     {
         var stopwatch = Stopwatch.StartNew();
-
         var dims = Console.ReadLine().Split();
         var w = int.Parse(dims[0]);
         var h = int.Parse(dims[1]);
@@ -69,6 +68,7 @@ public class Solution
 internal class TilingSolver
 {
     private readonly Dictionary<ShapeMask, Dictionary<(long, int), (long price, long ways)>> _canonicalBlockMemo = new();
+
     private static readonly (int dx, int dy)[][] Tetrominoes =
     {
         new[] { (0, 0), (1, 0), (2, 0), (3, 0) }, new[] { (0, 0), (0, 1), (0, 2), (0, 3) }, null, null,
@@ -89,39 +89,47 @@ internal class TilingSolver
         var minPrice = prices.Length > 0 ? prices.Min() : 0;
         var (forcedPrice, forcedUsage) = ProcessForcedMoves(floor, w, h, prices);
         var visited = new bool[h, w];
-        var dp = new Dictionary<(long, int), (long price, long ways)> { { (0L, 0), (0, 1) } };
-        var componentIndex = 0;
+        var dp = new Dictionary<(long, int), (long price, long ways)>
+        {
+            { (0L, 0), (0, 1) }
+        };
+
         for (var r = 0; r < h; r++)
         {
             for (var c = 0; c < w; c++)
             {
                 if (floor[r][c] != '.' || visited[r, c]) continue;
+
                 var componentCells = FindComponent(floor, w, h, r, c, visited);
                 if (componentCells.Count == 0) continue;
-                componentIndex++;
+
                 if (componentCells.Count % 4 != 0)
                 {
                     dp.Clear();
                     break;
                 }
+
                 var (block, blockW, blockH) = CreateBlockFromComponent(componentCells);
                 var blockMask = new ShapeMask(block.SelectMany(row => row).ToArray());
+
                 if (!_canonicalBlockMemo.TryGetValue(blockMask, out var blockSolutions))
                 {
                     blockSolutions = SolveAndMemoizeBlock(block, blockW, blockH, prices, minPrice);
                 }
-               
-                if (dp.Any() && blockSolutions.Any())
+
+                if (dp.Count != 0 && blockSolutions.Count != 0)
                 {
                     dp = CombineSolutions(dp, blockSolutions);
                 }
-                else if (blockSolutions.Count == 0 && componentCells.Any() && dp.Any())
+                else if (blockSolutions.Count == 0 && componentCells.Count != 0 && dp.Count != 0)
                 {
                     dp.Clear();
                 }
             }
-            if (!dp.Any()) break;
+
+            if (dp.Count == 0) break;
         }
+
         Console.Error.WriteLine("[DEBUG] All components processed. Aggregating final results.");
         return AggregateFinalResults(dp, forcedPrice, forcedUsage);
     }
@@ -129,34 +137,44 @@ internal class TilingSolver
     private Dictionary<(long, int), (long price, long ways)> SolveAndMemoizeBlock(char[][] block, int blockW, int blockH, long[] prices, long minPrice)
     {
         var (blkPieces, blkTypes, blkPosToPieces, blkPosCounts) = GetPieces(block, blockW, blockH);
-        foreach (var k in blkPosToPieces.Keys)
+
+        foreach (var key in blkPosToPieces.Keys)
         {
-            blkPosToPieces[k] = blkPosToPieces[k].OrderBy(pid => prices[blkTypes[pid]]).ToList();
+            blkPosToPieces[key] = blkPosToPieces[key].OrderBy(pid => prices[blkTypes[pid]]).ToList();
         }
+
         var allPlacements = blkPieces.Select((p, i) => (cells: p, type: blkTypes[i])).ToArray();
         var solver = new BlockSolver(allPlacements, prices, minPrice);
         var bestPrice = long.MaxValue;
         var blockKey = block.SelectMany(row => row).ToArray();
-        var rawSolutions = solver.Solve(blkPosToPieces, blkPosCounts, blockKey, new int[7], 0, ref bestPrice);
+        var rawSolutions = solver.Solve(blkPosToPieces, blkPosCounts, new ShapeMask(blockKey), new int[7], 0, ref bestPrice);
         var bestSolutions = new Dictionary<(long, int), (long price, long ways)>();
-        if (rawSolutions.Any())
+
+        if (rawSolutions.Count != 0)
         {
             var minP = rawSolutions.Min(s => s.Value.price);
-            foreach (var sol in rawSolutions)
+
+            foreach (var solution in rawSolutions)
             {
-                if (sol.Value.price == minP)
-                    bestSolutions[sol.Key] = sol.Value;
+                if (solution.Value.price == minP)
+                {
+                    bestSolutions[solution.Key] = solution.Value;
+                }
             }
         }
+
         var rotated = block;
+
         for (var rot = 0; rot < 4; rot++)
         {
             var rotKey = rotated.SelectMany(row => row).ToArray();
             var rotMask = new ShapeMask(rotKey);
+
             if (!_canonicalBlockMemo.ContainsKey(rotMask))
             {
                 _canonicalBlockMemo[rotMask] = bestSolutions;
             }
+
             if (rot < 3)
             {
                 var hCurr = rotated.Length;
@@ -164,95 +182,142 @@ internal class TilingSolver
                 RotateLeft(rotated, out rotated, ref wCurr, ref hCurr);
             }
         }
+
         return _canonicalBlockMemo[new ShapeMask(blockKey)];
     }
 
-    private static Dictionary<(long, int), (long price, long ways)> CombineSolutions(Dictionary<(long, int), (long price, long ways)> dp, Dictionary<(long, int), (long price, long ways)> blockSolutions)
+    private static Dictionary<(long, int), (long price, long ways)> CombineSolutions(
+        Dictionary<(long, int), (long price, long ways)> dp,
+        Dictionary<(long, int), (long price, long ways)> blockSolutions)
     {
         var nextDp = new Dictionary<(long, int), (long price, long ways)>();
+
         foreach (var (prevUsageKey, prevVal) in dp)
         {
             foreach (var (blockUsageKey, blockVal) in blockSolutions)
             {
-                var prevU = PieceCountEncoder.Unpack(prevUsageKey);
-                var blkU = PieceCountEncoder.Unpack(blockUsageKey);
+                var prevUsage = PieceCountEncoder.Unpack(prevUsageKey);
+                var blockUsage = PieceCountEncoder.Unpack(blockUsageKey);
                 var totalUsage = new int[7];
-                for (var i = 0; i < 7; i++) totalUsage[i] = prevU[i] + blkU[i];
+
+                for (var i = 0; i < 7; i++)
+                {
+                    totalUsage[i] = prevUsage[i] + blockUsage[i];
+                }
+
                 var combinedKey = PieceCountEncoder.Pack(totalUsage);
                 var combinedPrice = prevVal.price + blockVal.price;
                 var combinedWays = prevVal.ways * blockVal.ways;
+
                 if (!nextDp.TryGetValue(combinedKey, out var existing))
+                {
                     nextDp[combinedKey] = (combinedPrice, combinedWays);
+                }
                 else if (combinedPrice < existing.price)
+                {
                     nextDp[combinedKey] = (combinedPrice, combinedWays);
+                }
                 else if (combinedPrice == existing.price)
+                {
                     nextDp[combinedKey] = (combinedPrice, existing.ways + combinedWays);
+                }
             }
         }
+
         return nextDp;
     }
 
-    private static Dictionary<(long, int), (long price, long ways)> AggregateFinalResults(Dictionary<(long, int), (long price, long ways)> dp, long forcedPrice, int[] forcedUsage)
+    private static Dictionary<(long, int), (long price, long ways)> AggregateFinalResults(
+        Dictionary<(long, int), (long price, long ways)> dp,
+        long forcedPrice,
+        int[] forcedUsage)
     {
         var final = new Dictionary<(long, int), (long price, long ways)>();
+
         foreach (var kvp in dp)
         {
             var usage = PieceCountEncoder.Unpack(kvp.Key);
-            for (var i = 0; i < 7; i++) usage[i] += forcedUsage[i];
+
+            for (var i = 0; i < 7; i++)
+            {
+                usage[i] += forcedUsage[i];
+            }
+
             var finalKey = PieceCountEncoder.Pack(usage);
-            var priceF = kvp.Value.price + forcedPrice;
-            if (!final.TryGetValue(finalKey, out var ex) || priceF < ex.price)
-                final[finalKey] = (priceF, kvp.Value.ways);
-            else if (priceF == ex.price)
-                final[finalKey] = (priceF, ex.ways + kvp.Value.ways);
+            var price = kvp.Value.price + forcedPrice;
+
+            if (!final.TryGetValue(finalKey, out var existing) || price < existing.price)
+            {
+                final[finalKey] = (price, kvp.Value.ways);
+            }
+            else if (price == existing.price)
+            {
+                final[finalKey] = (price, existing.ways + kvp.Value.ways);
+            }
         }
+
         return final;
     }
 
     private static (List<int[]> pieces, List<int> types, Dictionary<int, List<int>> posToPieces, Dictionary<int, int> posCounts) GetPieces(char[][] floor, int w, int h)
     {
-        var pList = new List<int[]>();
-        var pTypes = new List<int>();
-        var pToPieces = new Dictionary<int, List<int>>();
-        var pCounts = new Dictionary<int, int>();
-        var pId = 0;
+        var pieces = new List<int[]>();
+        var types = new List<int>();
+        var posToPieces = new Dictionary<int, List<int>>();
+        var posCounts = new Dictionary<int, int>();
+        var pieceId = 0;
+
         for (var r = 0; r < h; r++)
         {
             for (var c = 0; c < w; c++)
             {
                 if (floor[r][c] == '#') continue;
+
                 for (var t = 0; t < Tetrominoes.Length; t++)
                 {
                     var moves = Tetrominoes[t];
                     if (moves == null) continue;
-                    var posIdx = new int[moves.Length];
+
+                    var positions = new int[moves.Length];
                     var canPlace = true;
+
                     for (var m = 0; m < moves.Length; m++)
                     {
                         var (dx, dy) = moves[m];
                         var nr = r + dy;
                         var nc = c + dx;
+
                         if (nr < 0 || nr >= h || nc < 0 || nc >= w || floor[nr][nc] != '.')
                         {
                             canPlace = false;
                             break;
                         }
-                        posIdx[m] = nr * w + nc;
+
+                        positions[m] = nr * w + nc;
                     }
+
                     if (!canPlace) continue;
-                    pList.Add(posIdx);
-                    pTypes.Add(t / 4);
-                    foreach (var cell in posIdx)
+
+                    pieces.Add(positions);
+                    types.Add(t / 4);
+
+                    foreach (var cell in positions)
                     {
-                        if (!pToPieces.TryGetValue(cell, out var list)) pToPieces[cell] = list = new List<int>();
-                        list.Add(pId);
-                        pCounts[cell] = pCounts.GetValueOrDefault(cell, 0) + 1;
+                        if (!posToPieces.TryGetValue(cell, out var list))
+                        {
+                            posToPieces[cell] = list = new List<int>();
+                        }
+
+                        list.Add(pieceId);
+                        posCounts[cell] = posCounts.GetValueOrDefault(cell, 0) + 1;
                     }
-                    pId++;
+
+                    pieceId++;
                 }
             }
         }
-        return (pList, pTypes, pToPieces, pCounts);
+
+        return (pieces, types, posToPieces, posCounts);
     }
 
     private static (long forcedPrice, int[] forcedUsage) ProcessForcedMoves(char[][] floor, int w, int h, long[] prices)
@@ -260,11 +325,14 @@ internal class TilingSolver
         var forcedPrice = 0L;
         var forcedUsage = new int[7];
         bool added;
+
         do
         {
             added = false;
+
             var (pieces, pieceTypes, posToPieces, posCounts) = GetPieces(floor, w, h);
             var cellToForce = -1;
+
             foreach (var kvp in posCounts)
             {
                 if (kvp.Value == 1)
@@ -273,76 +341,102 @@ internal class TilingSolver
                     break;
                 }
             }
+
             if (cellToForce != -1)
             {
                 var pieceId = posToPieces[cellToForce][0];
-                var pt = pieceTypes[pieceId];
-                forcedUsage[pt]++;
-                forcedPrice += prices[pt];
+                var type = pieceTypes[pieceId];
+
+                forcedUsage[type]++;
+                forcedPrice += prices[type];
+
                 foreach (var cell in pieces[pieceId])
                 {
                     floor[cell / w][cell % w] = '#';
                 }
+
                 added = true;
             }
         } while (added);
+
         return (forcedPrice, forcedUsage);
     }
 
     private static List<(int x, int y)> FindComponent(char[][] floor, int w, int h, int r, int c, bool[,] visited)
     {
         var stack = new Stack<(int x, int y)>();
-        stack.Push((c, r));
         var cells = new List<(int x, int y)>();
+
+        stack.Push((c, r));
+
         while (stack.Count > 0)
         {
-            var (cx, cy) = stack.Pop();
-            if (cx < 0 || cy < 0 || cx >= w || cy >= h || floor[cy][cx] == '#' || visited[cy, cx]) continue;
-            visited[cy, cx] = true;
-            cells.Add((cx, cy));
-            stack.Push((cx + 1, cy));
-            stack.Push((cx - 1, cy));
-            stack.Push((cx, cy + 1));
-            stack.Push((cx, cy - 1));
+            var (x, y) = stack.Pop();
+
+            if (x < 0 || y < 0 || x >= w || y >= h || floor[y][x] == '#' || visited[y, x])
+            {
+                continue;
+            }
+
+            visited[y, x] = true;
+            cells.Add((x, y));
+
+            stack.Push((x + 1, y));
+            stack.Push((x - 1, y));
+            stack.Push((x, y + 1));
+            stack.Push((x, y - 1));
         }
+
         return cells;
     }
 
     private static (char[][] block, int w, int h) CreateBlockFromComponent(List<(int x, int y)> cells)
     {
-        var minR = int.MaxValue;
-        var maxR = int.MinValue;
-        var minC = int.MaxValue;
-        var maxC = int.MinValue;
+        var minRow = int.MaxValue;
+        var maxRow = int.MinValue;
+        var minCol = int.MaxValue;
+        var maxCol = int.MinValue;
+
         foreach (var (x, y) in cells)
         {
-            if (y < minR) minR = y;
-            if (y > maxR) maxR = y;
-            if (x < minC) minC = x;
-            if (x > maxC) maxC = x;
+            if (y < minRow) minRow = y;
+            if (y > maxRow) maxRow = y;
+            if (x < minCol) minCol = x;
+            if (x > maxCol) maxCol = x;
         }
-        var blockH = (maxR - minR + 1) + 2;
-        var blockW = (maxC - minC + 1) + 2;
+
+        var blockH = maxRow - minRow + 3;
+        var blockW = maxCol - minCol + 3;
         var block = new char[blockH][];
-        for (var i = 0; i < blockH; i++)
+
+        for (var r = 0; r < blockH; r++)
         {
-            block[i] = new char[blockW];
-            Array.Fill(block[i], '#');
+            block[r] = new char[blockW];
+            Array.Fill(block[r], '#');
         }
-        foreach (var (cx, cy) in cells)
-            block[cy - minR + 1][cx - minC + 1] = '.';
+
+        foreach (var (x, y) in cells)
+        {
+            block[y - minRow + 1][x - minCol + 1] = '.';
+        }
+
         return (block, blockW, blockH);
     }
 
-    private static void RotateLeft(char[][] f, out char[][] rotated, ref int w, ref int h)
+    private static void RotateLeft(char[][] floor, out char[][] rotated, ref int w, ref int h)
     {
         rotated = new char[w][];
+
         for (var x = 0; x < w; x++)
         {
             rotated[x] = new char[h];
+
             for (var y = 0; y < h; y++)
-                rotated[x][y] = f[h - 1 - y][x];
+            {
+                rotated[x][y] = floor[h - 1 - y][x];
+            }
         }
+
         (w, h) = (h, w);
     }
 }
@@ -352,40 +446,61 @@ internal class BlockSolver
     private readonly (int[] cells, int type)[] _allPieces;
     private readonly long[] _piecePrices;
     private readonly long _minPiecePrice;
+    private readonly ShapeMask[] _pieceMasks;
     private readonly Dictionary<(ShapeMask, (long, int)), Dictionary<(long, int), (long price, long ways)>> _memo;
 
-    public BlockSolver((int[], int)[] placements, long[] prices, long minPrice)
+    public BlockSolver((int[] cells, int type)[] placements, long[] prices, long minPrice)
     {
         _allPieces = placements;
         _piecePrices = prices;
         _minPiecePrice = minPrice;
-        _memo = new Dictionary<(ShapeMask, (long, int)), Dictionary<(long, int), (long, long)>>();
+        _pieceMasks = new ShapeMask[placements.Length];
+
+        for (var i = 0; i < placements.Length; i++)
+        {
+            _pieceMasks[i] = new ShapeMask(placements[i].cells);
+        }
+
+        _memo = new Dictionary<(ShapeMask, (long, int)), Dictionary<(long, int), (long price, long ways)>>();
     }
 
     public Dictionary<(long, int), (long price, long ways)> Solve(
         Dictionary<int, List<int>> openPositions,
         Dictionary<int, int> cellCoverageCounts,
-        char[] floor,
+        ShapeMask boardKey,
         int[] usage,
         long currentPrice,
         ref long bestBlockPrice)
     {
         var usageKey = PieceCountEncoder.Pack(usage);
-        var boardKey = new ShapeMask(floor);
         var memoKey = (boardKey, usageKey);
+
         if (_memo.TryGetValue(memoKey, out var memoizedResult))
         {
             return memoizedResult;
         }
+
         if (openPositions.Count == 0)
         {
-            if (currentPrice < bestBlockPrice) bestBlockPrice = currentPrice;
-            return new Dictionary<(long, int), (long price, long ways)> { { usageKey, (price: currentPrice, ways: 1) } };
+            if (currentPrice < bestBlockPrice)
+            {
+                bestBlockPrice = currentPrice;
+            }
+
+            return new Dictionary<(long, int), (long price, long ways)>
+            {
+                { usageKey, (currentPrice, 1) }
+            };
         }
+
         if (currentPrice + _minPiecePrice * (openPositions.Count / 4) > bestBlockPrice)
-            return new Dictionary<(long, int), (long, long)>();
+        {
+            return new Dictionary<(long, int), (long price, long ways)>();
+        }
+
         var cellToFill = -1;
         var minCoverage = int.MaxValue;
+
         foreach (var kvp in cellCoverageCounts)
         {
             if (kvp.Value < minCoverage)
@@ -394,53 +509,98 @@ internal class BlockSolver
                 cellToFill = kvp.Key;
             }
         }
-        if (minCoverage == 0 || (cellToFill == -1 && openPositions.Any()))
-            return new Dictionary<(long, int), (long, long)>();
+
+        if (minCoverage == 0 || (cellToFill == -1 && openPositions.Count != 0))
+        {
+            return new Dictionary<(long, int), (long price, long ways)>();
+        }
+
         var results = new Dictionary<(long, int), (long price, long ways)>();
         var placementsToTry = openPositions[cellToFill];
-        foreach (var placementIdToTry in placementsToTry)
+
+        foreach (var placementId in placementsToTry)
         {
-            var (cells, type) = _allPieces[placementIdToTry];
+            var (cells, type) = _allPieces[placementId];
             usage[type]++;
+
             var nextPositions = new Dictionary<int, List<int>>(openPositions.Count);
-            foreach (var kvp in openPositions) nextPositions[kvp.Key] = new List<int>(kvp.Value);
+
+            foreach (var kvp in openPositions)
+            {
+                nextPositions[kvp.Key] = new List<int>(kvp.Value);
+            }
+
             var nextCounts = new Dictionary<int, int>(cellCoverageCounts);
-            var nextFloor = (char[])floor.Clone();
+
             foreach (var cell in cells)
             {
-                nextFloor[cell] = '#';
-                if (!nextPositions.TryGetValue(cell, out var affectedList)) continue;
-                foreach (var affectedPieceId in affectedList.ToArray())
+                if (!nextPositions.TryGetValue(cell, out var affectedPieces))
+                {
+                    continue;
+                }
+
+                foreach (var affectedPieceId in affectedPieces.ToArray())
                 {
                     foreach (var affectedCell in _allPieces[affectedPieceId].cells)
                     {
-                        if (nextCounts.ContainsKey(affectedCell)) nextCounts[affectedCell]--;
-                        if (nextPositions.TryGetValue(affectedCell, out var pieceList)) pieceList.Remove(affectedPieceId);
+                        if (nextCounts.ContainsKey(affectedCell))
+                        {
+                            nextCounts[affectedCell]--;
+                        }
+
+                        if (nextPositions.TryGetValue(affectedCell, out var pieceList))
+                        {
+                            pieceList.Remove(affectedPieceId);
+                        }
                     }
                 }
+
                 nextPositions.Remove(cell);
                 nextCounts.Remove(cell);
             }
-            var recursiveSolutions = Solve(nextPositions, nextCounts, nextFloor, usage, currentPrice + _piecePrices[type], ref bestBlockPrice);
-            foreach (var solPair in recursiveSolutions)
+
+            var recursiveSolutions = Solve(
+                nextPositions,
+                nextCounts,
+                boardKey.Remove(_pieceMasks[placementId]),
+                usage,
+                currentPrice + _piecePrices[type],
+                ref bestBlockPrice);
+
+            foreach (var solution in recursiveSolutions)
             {
-                if (!results.TryGetValue(solPair.Key, out var existing))
-                    results[solPair.Key] = solPair.Value;
-                else if (solPair.Value.price < existing.price)
-                    results[solPair.Key] = solPair.Value;
-                else if (solPair.Value.price == existing.price)
-                    results[solPair.Key] = (solPair.Value.price, existing.ways + solPair.Value.ways);
+                if (!results.TryGetValue(solution.Key, out var existing))
+                {
+                    results[solution.Key] = solution.Value;
+                }
+                else if (solution.Value.price < existing.price)
+                {
+                    results[solution.Key] = solution.Value;
+                }
+                else if (solution.Value.price == existing.price)
+                {
+                    results[solution.Key] = (solution.Value.price, existing.ways + solution.Value.ways);
+                }
             }
+
             usage[type]--;
         }
+
         var optimalResults = new Dictionary<(long, int), (long price, long ways)>();
-        if (results.Any())
+
+        if (results.Count != 0)
         {
-            var minPriceForBranch = results.Min(r => r.Value.price);
-            foreach (var kvp in results)
-                if (kvp.Value.price == minPriceForBranch && kvp.Value.price <= bestBlockPrice)
-                    optimalResults[kvp.Key] = kvp.Value;
+            var minPriceForBranch = results.Min(pair => pair.Value.price);
+
+            foreach (var result in results)
+            {
+                if (result.Value.price == minPriceForBranch && result.Value.price <= bestBlockPrice)
+                {
+                    optimalResults[result.Key] = result.Value;
+                }
+            }
         }
+
         _memo[memoKey] = optimalResults;
         return results;
     }
@@ -451,20 +611,28 @@ internal static class PieceCountEncoder
     internal static (long, int) Pack(int[] usage)
     {
         var key1 = 0L;
+
         for (var i = 0; i < 6; i++)
+        {
             key1 = (key1 << 10) | (uint)usage[i];
+        }
+
         return (key1, usage[6]);
     }
+
     internal static int[] Unpack((long, int) key)
     {
         var (key1, key2) = key;
         var usage = new int[7];
+
         usage[6] = key2;
+
         for (var i = 5; i >= 0; i--)
         {
             usage[i] = (int)(key1 & 1023);
             key1 >>= 10;
         }
+
         return usage;
     }
 }
@@ -475,32 +643,114 @@ internal readonly struct ShapeMask : IEquatable<ShapeMask>
     internal readonly ulong p2;
     internal readonly ulong p3;
     internal readonly ulong p4;
+
     public ShapeMask(char[] block)
     {
-        p1 = p2 = p3 = p4 = 0;
+        p1 = 0;
+        p2 = 0;
+        p3 = 0;
+        p4 = 0;
+
         for (var bit = 0; bit < block.Length; bit++)
         {
-            if (block[bit] == '.')
+            if (block[bit] != '.') continue;
+
+            if (bit < 64)
             {
-                if (bit < 64) p1 |= 1UL << bit;
-                else if (bit < 128) p2 |= 1UL << (bit - 64);
-                else if (bit < 192) p3 |= 1UL << (bit - 128);
-                else p4 |= 1UL << (bit - 192);
+                p1 |= 1UL << bit;
+            }
+            else if (bit < 128)
+            {
+                p2 |= 1UL << (bit - 64);
+            }
+            else if (bit < 192)
+            {
+                p3 |= 1UL << (bit - 128);
+            }
+            else
+            {
+                p4 |= 1UL << (bit - 192);
             }
         }
     }
-    public bool Equals(ShapeMask other) => p1 == other.p1 && p2 == other.p2 && p3 == other.p3 && p4 == other.p4;
-    public override bool Equals(object obj) => obj is ShapeMask other && Equals(other);
-    public override int GetHashCode() => HashCode.Combine(p1, p2, p3, p4);
+
+    public ShapeMask(int[] cells)
+    {
+        p1 = 0;
+        p2 = 0;
+        p3 = 0;
+        p4 = 0;
+
+        for (var i = 0; i < cells.Length; i++)
+        {
+            var bit = cells[i];
+
+            if (bit < 64)
+            {
+                p1 |= 1UL << bit;
+            }
+            else if (bit < 128)
+            {
+                p2 |= 1UL << (bit - 64);
+            }
+            else if (bit < 192)
+            {
+                p3 |= 1UL << (bit - 128);
+            }
+            else
+            {
+                p4 |= 1UL << (bit - 192);
+            }
+        }
+    }
+
+    private ShapeMask(ulong p1, ulong p2, ulong p3, ulong p4)
+    {
+        this.p1 = p1;
+        this.p2 = p2;
+        this.p3 = p3;
+        this.p4 = p4;
+    }
+
+    internal ShapeMask Remove(ShapeMask other)
+    {
+        return new ShapeMask(
+            p1 & ~other.p1,
+            p2 & ~other.p2,
+            p3 & ~other.p3,
+            p4 & ~other.p4);
+    }
+
+    public bool Equals(ShapeMask other)
+    {
+        return p1 == other.p1 && p2 == other.p2 && p3 == other.p3 && p4 == other.p4;
+    }
+
+    public override bool Equals(object obj)
+    {
+        return obj is ShapeMask other && Equals(other);
+    }
+
+    public override int GetHashCode()
+    {
+        return HashCode.Combine(p1, p2, p3, p4);
+    }
 }
 
 internal class PieceCountComparer : IComparer<int[]>
 {
     public static readonly PieceCountComparer Instance = new();
+
     public int Compare(int[] x, int[] y)
     {
         for (var i = 0; i < x.Length; i++)
-            if (x[i] != y[i]) return x[i].CompareTo(y[i]);
+        {
+            if (x[i] != y[i])
+            {
+                return x[i].CompareTo(y[i]);
+            }
+        }
+
         return 0;
     }
 }

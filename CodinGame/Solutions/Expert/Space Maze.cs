@@ -227,6 +227,12 @@ class Board : IEquatable<Board>
     }
 
     static int GetIndex(Cell c) => c.Y * Width + c.X;
+    static bool SameGroundCarState(Cell a, Cell b)
+    {
+        if (a.Equals(b)) return true;
+        if (a.IsTarget || b.IsTarget) return false;
+        return a.CanEnter && b.CanEnter && Distances[GetIndex(a), GetIndex(b)] > 0;
+    }
 
     public bool IsWin() => Distances[GetIndex(Car.Cell), GetIndex(TargetCell)] >= 0;
 
@@ -278,6 +284,9 @@ class Board : IEquatable<Board>
     public List<Board> Expand()
     {
         var nextBoards = new List<Board>(16);
+        var occupied = new bool[Width * Height];
+        for (var i = 0; i < Platforms.Count; i++)
+            occupied[Platforms[i].Y * Width + Platforms[i].X] = true;
         if (Distances[GetIndex(Car.Cell), GetIndex(TargetCell)] > 0)
         {
             var b = new Board(this);
@@ -306,6 +315,17 @@ class Board : IEquatable<Board>
                 var carMoves = Car.Expand(this);
                 for (var k = 0; k < carMoves.Count; k++)
                 {
+                    var duplicateGroundState = false;
+                    for (var previous = 0; previous < k; previous++)
+                    {
+                        if (SameGroundCarState(carMoves[previous].Cell, carMoves[k].Cell))
+                        {
+                            duplicateGroundState = true;
+                            break;
+                        }
+                    }
+                    if (duplicateGroundState) continue;
+
                     var b = new Board(this);
                     b.Car = carMoves[k];
                     b.Platforms = Platforms;
@@ -338,7 +358,7 @@ class Board : IEquatable<Board>
         for (var i = 0; i < Platforms.Count; i++)
         {
             var p = Platforms[i];
-            var expandedPlats = p.Expand(this);
+            var expandedPlats = p.Expand(occupied);
             for (var j = 0; j < expandedPlats.Count; j++)
             {
                 var newPlats = new List<Platform>(Platforms.Count);
@@ -385,8 +405,8 @@ class Board : IEquatable<Board>
                 if (isOffMap || isOnVoid)
                     return 50;
 
-                var oldDist = Distances[GetIndex(Parent.Car.Cell), GetIndex(TargetCell)];
-                var newDist = Distances[GetIndex(Car.Cell), GetIndex(TargetCell)];
+                var oldDist = Distances[GetIndex(Car.Cell), GetIndex(TargetCell)];
+                var newDist = Distances[GetIndex(lastPlat), GetIndex(TargetCell)];
                 bool moveImprovesPath = newDist >= 0 && newDist < oldDist;
 
                 if (moveImprovesPath)
@@ -529,7 +549,7 @@ class Platform : Cell
     }
     public bool Equals(Platform other) => base.Equals(other) && directionMask == other.directionMask;
     public override int GetHashCode() => Zobrist[X, Y, directionMask];
-    public List<Platform> Expand(Board board)
+    public List<Platform> Expand(bool[] occupied)
     {
         var result = new List<Platform>(4);
         for (var idx = 0; idx < Directions.Count; idx++)
@@ -542,9 +562,7 @@ class Platform : Cell
                 x += Car.dx[dir];
                 y += Car.dy[dir];
                 if (x < 0 || x >= Board.Width || y < 0 || y >= Board.Height) break;
-                var canStop = Board.Cells[x, y].CanEnter;
-                for (var i = 0; !canStop && i < board.Platforms.Count; i++)
-                    if (board.Platforms[i].X == x && board.Platforms[i].Y == y) canStop = true;
+                var canStop = Board.Cells[x, y].CanEnter || occupied[y * Board.Width + x];
                 if (canStop)
                 {
                     var prevX = x - Car.dx[dir];
@@ -592,24 +610,30 @@ class Car
         for (var i = 0; i < width; i++)
             for (var j = 0; j < height; j++)
                 Zobrist[i, j] = rand.Next();
+
         var visited = new bool[width, height];
         for (var y = 0; y < height; y++)
             for (var x = 0; x < width; x++)
             {
-                var c = Board.Cells[x, y];
-                if (!c.CanEnter || c.IsTarget) continue;
+                var start = Board.Cells[x, y];
+                if (!start.CanEnter || start.IsTarget || visited[x, y]) continue;
+
+                var componentHash = Zobrist[x, y];
                 var queue = new Queue<Cell>();
-                queue.Enqueue(c);
+                queue.Enqueue(start);
                 while (queue.Count > 0)
                 {
                     var curr = queue.Dequeue();
                     if (visited[curr.X, curr.Y]) continue;
                     visited[curr.X, curr.Y] = true;
-                    Zobrist[curr.X, curr.Y] = Zobrist[c.X, c.Y];
+
+                    if (!curr.IsTarget)
+                        Zobrist[curr.X, curr.Y] = componentHash;
+
                     for (var dir = 0; dir < 4; dir++)
                     {
                         var n = curr.Neighbors[dir];
-                        if (n != null && n.CanEnter && !n.IsTarget)
+                        if (n != null && n.CanEnter && !visited[n.X, n.Y])
                             queue.Enqueue(n);
                     }
                 }

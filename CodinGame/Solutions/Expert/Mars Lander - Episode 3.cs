@@ -55,32 +55,32 @@ public sealed class Pid
 // ------------------------------------------------------------
 public sealed class ApproachController
 {
+    private const int HORIZONTAL_SPEED_DEADBAND = 2;
+    private const int MAX_ROTATION_CHANGE_PER_TURN = 12;
     private readonly Pid _pidV = new(0.55, 0, 0);
     private readonly Pid _pidH = new(5.0, 0, 0);
     private readonly Pid _pidAngle = new(5.0, 0, 0);
-    private int _rotate, _power, _prevHSpeed;
+    private int _rotate, _power;
 
     public (int rotate, int power) Step(int hSpeed, int hSetpoint, int vSpeed, int vSetpoint)
     {
-        if (hSpeed != hSetpoint || _prevHSpeed != hSpeed)
+        if (Math.Abs(hSetpoint - hSpeed) > HORIZONTAL_SPEED_DEADBAND)
         {
             _power = 4;
             int hGain = _pidH.Regulate(hSetpoint, hSpeed);
             int angleGain = _pidAngle.Regulate(vSetpoint, vSpeed) - 23;
             if (hGain > 0) angleGain = -angleGain;
-            // Cancel opposing signs
             if (hGain < 0 && angleGain > 0) angleGain = 0;
             else if (hGain > 0 && angleGain < 0) angleGain = 0;
-            // Clamp toward angleGain when same sign
             if (hGain > 0 && hGain > angleGain) hGain = angleGain;
             else if (hGain < 0 && hGain < angleGain) hGain = angleGain;
 
-            _rotate = -Math.Clamp(hGain, -90, 90);
-            _prevHSpeed = hSpeed;
+            int desiredRotate = -Math.Clamp(hGain, -90, 90);
+            _rotate = MoveToward(_rotate, desiredRotate, MAX_ROTATION_CHANGE_PER_TURN);
         }
         else
         {
-            _rotate = 0;
+            _rotate = MoveToward(_rotate, 0, MAX_ROTATION_CHANGE_PER_TURN);
             int g = -_pidV.Regulate(vSetpoint, vSpeed);
             _power = g switch
             {
@@ -90,8 +90,16 @@ public sealed class ApproachController
                 < 4 => 1,
                 _ => 0
             };
+            if (Math.Abs(_rotate) > MAX_ROTATION_CHANGE_PER_TURN) _power = 4;
         }
         return (_rotate, _power);
+    }
+
+    private static int MoveToward(int value, int target, int maximumChange)
+    {
+        if (value < target) return Math.Min(value + maximumChange, target);
+        if (value > target) return Math.Max(value - maximumChange, target);
+        return value;
     }
 }
 
@@ -100,37 +108,147 @@ public sealed class ApproachController
 // ------------------------------------------------------------
 public class Player
 {
-    // Physics & tuning ---------------------------------------------------
-    private const double MARS_GRAVITY = 3.711;
-    private const double MAX_HORIZONTAL_SPEED = 20.0;
-    private const double MAX_VERTICAL_SPEED = 40.0;
-    private const int WAYPOINT_ALTITUDE_CLEARANCE = 300;
-    private const int WAYPOINT_REACHED_THRESHOLD = 200;
+    // Physics / game rules -----------------------------------------------
+    // These are facts from the game world / CodinGame Mars Lander rules.
+    private const double MARS_GRAVITY = 3.711;              // m/s^2 downward
+    private const double MAX_THRUST_ACCELERATION = 4.0;     // m/s^2 at power 4
 
-    private const double MAX_THRUST_ACCELERATION = 4.0;
-    private const double REFERENCE_VERTICAL_ACCELERATION = 1.8 * MARS_GRAVITY;
-    private const double ANGLE_CONTROL_AGGRESSIVENESS = 2.76123;
-    private const double POSITIONAL_P_GAIN = 2.8 / 185.0;
-    private const double DERIVATIVE_D_GAIN = 8.2 / 24.7;
-    private const double VERTICAL_TIMESCALE_TUNING = 1.35;
-    private const double HORIZONTAL_TIMESCALE_TUNING = 3.3;
-    private const double HORIZONTAL_BRAKING_DEAD_ZONE_RATIO = 0.39;
-    private const double FINAL_APPROACH_TIME_SECONDS = 1.9;
-    private const double ENGINE_CUTOFF_VSPEED_RATIO = 0.75;
-    private const double TARGET_LANDING_VSPEED_RATIO = 0.965;
-    private const double PANIC_TIME_SECONDS = 60.0;
+    // Safe touchdown limits. Stored as positive magnitudes for readability.
+    private const double MAX_SAFE_HORIZONTAL_SPEED = 20.0;  // m/s
+    private const double MAX_SAFE_DESCENT_SPEED = 40.0;     // m/s downward
 
-    private static readonly double V_TIMESCALE = (MAX_VERTICAL_SPEED / REFERENCE_VERTICAL_ACCELERATION) * VERTICAL_TIMESCALE_TUNING;
-    private static readonly double H_TIMESCALE = (MAX_HORIZONTAL_SPEED / MAX_THRUST_ACCELERATION) * HORIZONTAL_TIMESCALE_TUNING;
-    private static readonly double H_BRAKE_THR = MAX_HORIZONTAL_SPEED * HORIZONTAL_BRAKING_DEAD_ZONE_RATIO;
-    private static readonly int FINAL_APPROACH_ALT = (int)(MAX_VERTICAL_SPEED * FINAL_APPROACH_TIME_SECONDS);
-    private static readonly double TARGET_VSPEED = MAX_VERTICAL_SPEED * TARGET_LANDING_VSPEED_RATIO;
-    private static readonly int CUTOFF_VSPEED = (int)(-MAX_VERTICAL_SPEED * ENGINE_CUTOFF_VSPEED_RATIO);
-    private static readonly int CUTOFF_ALT = (int)((TARGET_VSPEED * TARGET_VSPEED - CUTOFF_VSPEED * CUTOFF_VSPEED) / (2 * MARS_GRAVITY));
-    private static readonly double NET_UP_ACC = MAX_THRUST_ACCELERATION - MARS_GRAVITY;
-    private static readonly int CRITICAL_HDIST = (int)(MAX_HORIZONTAL_SPEED * PANIC_TIME_SECONDS);
-    private static readonly int CRITICAL_ALT_BUFFER = (int)Math.Abs(
-        -MAX_VERTICAL_SPEED * PANIC_TIME_SECONDS + 0.5 * NET_UP_ACC * PANIC_TIME_SECONDS * PANIC_TIME_SECONDS);
+    // Controller policy --------------------------------------------------
+    // These are intentional behavior choices, not hidden physics constants.
+    private const double MAX_PLANNED_TILT_DEGREES = 45.0;
+    private const double FINAL_APPROACH_LOOKAHEAD_SECONDS = 1.9;
+    private const double PANIC_LOOKAHEAD_SECONDS = 60.0;
+
+    // Keep waypoint approach speed conservative so final landing starts with manageable lateral speed.
+    private const int MAX_WAYPOINT_HORIZONTAL_SPEED = 35;
+
+    // Do not dive toward a waypoint faster than the current horizontal travel time can support.
+    // This keeps the previous horizontal-speed fix, but prevents low waypoint targets from
+    // pulling the lander into terrain before it reaches them.
+    private const double WAYPOINT_MIN_TIME_TO_TARGET_SECONDS = 1.0;
+    private const double WAYPOINT_VERTICAL_PROFILE_GAIN = 1.0;
+
+    // Keep the target just below the legal landing limit: 40 - 1.4 = 38.6 m/s.
+    private const double TARGET_DESCENT_SPEED_MARGIN = 1.4;
+
+    // Start the final unpowered coast calculation around 30 m/s downward.
+    private const double COAST_START_DESCENT_SPEED = 0.75 * MAX_SAFE_DESCENT_SPEED;
+
+    // Safety margins around physically-derived thresholds.
+    private const double WAYPOINT_RADIUS_SAFETY_FACTOR = 1.5;
+    private const double HORIZONTAL_SETTLE_SAFETY_FACTOR = 1.25;
+    private const double HORIZONTAL_BRAKE_LOOKAHEAD_SECONDS = 2.75;
+    private const double VERTICAL_RESPONSE_SAFETY_FACTOR = 1.35;
+    private const double PLANNED_VERTICAL_ACCELERATION = 1.8 * MARS_GRAVITY;
+    private const double STEEP_TERRAIN_SIDE_MARGIN_FACTOR = 0.45;
+
+    // Angle PID scaling: at the reference position and speed errors, request ~30 degrees.
+    private const double FULL_POSITION_ERROR_METERS = 185.0;
+    private const double FULL_SPEED_ERROR = 24.7;
+    private const double POSITION_CONTROL_WEIGHT = 2.8;
+    private const double SPEED_CONTROL_WEIGHT = 8.2;
+    private const double MAX_HORIZONTAL_CONTROL_ANGLE_DEGREES = 30.37;
+
+    private static readonly double POSITIONAL_P_GAIN =
+        POSITION_CONTROL_WEIGHT / FULL_POSITION_ERROR_METERS;
+
+    private static readonly double DERIVATIVE_D_GAIN =
+        SPEED_CONTROL_WEIGHT / FULL_SPEED_ERROR;
+
+    private static readonly double ANGLE_CONTROL_AGGRESSIVENESS =
+        MAX_HORIZONTAL_CONTROL_ANGLE_DEGREES / (POSITION_CONTROL_WEIGHT + SPEED_CONTROL_WEIGHT);
+
+    // Derived physics ----------------------------------------------------
+    private static readonly double MAX_PLANNED_TILT_RADIANS = DegToRad(MAX_PLANNED_TILT_DEGREES);
+
+    private static readonly double NET_UP_ACCELERATION =
+        MAX_THRUST_ACCELERATION - MARS_GRAVITY;
+
+    // Horizontal acceleration available while still exactly compensating gravity vertically.
+    private static readonly double MAX_HOVERABLE_HORIZONTAL_ACCELERATION = Math.Sqrt(
+        MAX_THRUST_ACCELERATION * MAX_THRUST_ACCELERATION -
+        MARS_GRAVITY * MARS_GRAVITY);
+
+    private static readonly double MAX_AGGRESSIVE_HORIZONTAL_ACCELERATION =
+        MAX_THRUST_ACCELERATION * Math.Sin(MAX_PLANNED_TILT_RADIANS);
+
+    private static readonly double DOWNWARD_ACCELERATION_DURING_AGGRESSIVE_BRAKE = Math.Max(
+        0.0,
+        MARS_GRAVITY - MAX_THRUST_ACCELERATION * Math.Cos(MAX_PLANNED_TILT_RADIANS));
+
+    // Derived thresholds -------------------------------------------------
+    private static readonly double V_TIMESCALE =
+        (MAX_SAFE_DESCENT_SPEED / PLANNED_VERTICAL_ACCELERATION) * VERTICAL_RESPONSE_SAFETY_FACTOR;
+
+    private static readonly double H_TIMESCALE =
+        (MAX_SAFE_HORIZONTAL_SPEED / MAX_HOVERABLE_HORIZONTAL_ACCELERATION) * HORIZONTAL_SETTLE_SAFETY_FACTOR;
+
+    private static readonly double H_BRAKE_THR =
+        MAX_AGGRESSIVE_HORIZONTAL_ACCELERATION * HORIZONTAL_BRAKE_LOOKAHEAD_SECONDS;
+
+    private static readonly int WAYPOINT_REACHED_THRESHOLD = (int)Math.Ceiling(
+        StoppingDistance(MAX_SAFE_HORIZONTAL_SPEED, MAX_HOVERABLE_HORIZONTAL_ACCELERATION) *
+        WAYPOINT_RADIUS_SAFETY_FACTOR);
+
+    private static readonly int WAYPOINT_ALTITUDE_CLEARANCE = (int)Math.Ceiling(
+        AltitudeLostDuringHorizontalBrake(
+            MAX_SAFE_HORIZONTAL_SPEED,
+            MAX_SAFE_DESCENT_SPEED,
+            MAX_AGGRESSIVE_HORIZONTAL_ACCELERATION,
+            DOWNWARD_ACCELERATION_DURING_AGGRESSIVE_BRAKE));
+
+    private static readonly int FINAL_APPROACH_ALT =
+        (int)Math.Ceiling(MAX_SAFE_DESCENT_SPEED * FINAL_APPROACH_LOOKAHEAD_SECONDS);
+
+    private static readonly double TARGET_DESCENT_SPEED =
+        MAX_SAFE_DESCENT_SPEED - TARGET_DESCENT_SPEED_MARGIN;
+
+    private static readonly int CUTOFF_VSPEED =
+        -(int)Math.Round(COAST_START_DESCENT_SPEED);
+
+    private static readonly int CUTOFF_ALT = (int)Math.Ceiling(
+        FreeFallDistanceToSpeed(COAST_START_DESCENT_SPEED, TARGET_DESCENT_SPEED, MARS_GRAVITY));
+
+    private static readonly int CRITICAL_HDIST =
+        (int)Math.Ceiling(MAX_SAFE_HORIZONTAL_SPEED * PANIC_LOOKAHEAD_SECONDS);
+
+    private static readonly int CRITICAL_ALT_BUFFER = (int)Math.Ceiling(
+        AltitudeLostWhileRecoveringVerticalSpeed(
+            MAX_SAFE_DESCENT_SPEED,
+            NET_UP_ACCELERATION,
+            PANIC_LOOKAHEAD_SECONDS));
+
+    private static double DegToRad(double degrees) => degrees * Math.PI / 180.0;
+
+    private static double StoppingDistance(double speed, double acceleration) =>
+        speed * speed / (2.0 * acceleration);
+
+    private static double FreeFallDistanceToSpeed(
+        double fromDownwardSpeed,
+        double toDownwardSpeed,
+        double downwardAcceleration) =>
+        (toDownwardSpeed * toDownwardSpeed - fromDownwardSpeed * fromDownwardSpeed) /
+        (2.0 * downwardAcceleration);
+
+    private static double AltitudeLostDuringHorizontalBrake(
+        double horizontalSpeed,
+        double downwardSpeed,
+        double horizontalAcceleration,
+        double extraDownwardAcceleration)
+    {
+        double t = horizontalSpeed / horizontalAcceleration;
+        return downwardSpeed * t + 0.5 * extraDownwardAcceleration * t * t;
+    }
+
+    private static double AltitudeLostWhileRecoveringVerticalSpeed(
+        double initialDownwardSpeed,
+        double upwardAcceleration,
+        double seconds) =>
+        Math.Max(0.0, initialDownwardSpeed * seconds - 0.5 * upwardAcceleration * seconds * seconds);
 
     // State --------------------------------------------------------------
     private static readonly Queue<Point> _flightPlan = new();
@@ -166,7 +284,9 @@ public class Player
                 first = false;
             }
 
-            if (!_finalApproach && Point.Distance(new Point(X, Y), _target) < WAYPOINT_REACHED_THRESHOLD)
+            if (!_finalApproach &&
+                (Point.Distance(new Point(X, Y), _target) < WAYPOINT_REACHED_THRESHOLD ||
+                 HasPassedTargetX(X, hSpeed, Y)))
             {
                 Console.Error.WriteLine($"Waypoint ({_target.X},{_target.Y}) reached.");
                 AdvanceTarget();
@@ -192,9 +312,55 @@ public class Player
     private static (int rotate, int power) NavigateToWaypoint(int X, int Y, int hSpeed, int vSpeed)
     {
         Console.Error.WriteLine($"NAV: Target=({_target.X},{_target.Y})");
-        int hSet = Math.Clamp((int)((_target.X - X) * 0.15), -80, 80);
-        int vSet = Math.Clamp((int)((_target.Y - Y) * 0.15), -40, 40);
+
+        int hSet = Math.Clamp((int)((_target.X - X) * 0.12),
+                              -MAX_WAYPOINT_HORIZONTAL_SPEED,
+                               MAX_WAYPOINT_HORIZONTAL_SPEED);
+
+        int vSet = DesiredWaypointVerticalSpeed(X, Y, hSet);
         return _approach.Step(hSpeed, hSet, vSpeed, vSet);
+    }
+
+    private static int DesiredWaypointVerticalSpeed(int x, int y, int hSet)
+    {
+        int dy = _target.Y - y;
+
+        // Original behavior: proportional descent/climb toward the waypoint.
+        int proportional = Math.Clamp((int)(dy * 0.15), -40, 40);
+
+        // New guard: when the waypoint is still far away horizontally, descend only
+        // fast enough to arrive near its altitude when we also arrive near its X.
+        // Without this, the lander can hold HSpeed=-35 and VSpeed=-40, hitting
+        // terrain before it ever reaches a low waypoint.
+        double travelSpeed = Math.Max(MAX_SAFE_HORIZONTAL_SPEED, Math.Abs(hSet));
+        double timeToTargetX = Math.Max(
+            WAYPOINT_MIN_TIME_TO_TARGET_SECONDS,
+            Math.Abs(_target.X - x) / travelSpeed);
+
+        int profiled = Math.Clamp(
+            (int)Math.Round((dy / timeToTargetX) * WAYPOINT_VERTICAL_PROFILE_GAIN),
+            -40,
+             40);
+
+        // For downward travel both values are negative; taking Max chooses the safer,
+        // slower descent. For upward travel both are positive; taking Min avoids an
+        // over-aggressive climb command.
+        return dy < 0 ? Math.Max(proportional, profiled)
+                      : Math.Min(proportional, profiled);
+    }
+
+    private static bool HasPassedTargetX(int x, int hSpeed, int y)
+    {
+        int previousX = x - hSpeed; // telemetry is roughly one-second steps
+
+        bool crossed =
+            (previousX <= _target.X && x >= _target.X) ||
+            (previousX >= _target.X && x <= _target.X);
+
+        bool closeEnoughVertically =
+            y <= _target.Y + WAYPOINT_REACHED_THRESHOLD * 5;
+
+        return crossed && closeEnoughVertically;
     }
 
     // ---- Precision-landing math (unchanged) ---------------------------
@@ -327,16 +493,22 @@ public class Player
             return new Vec(-seg.Y, seg.X).Normalized();
         }
 
-        result.Add((Vec)surface[0] + Normal(0, 1) * safeAltitude);
+        Point OffsetWaypoint(Point point, Vec normal)
+        {
+            double clearance = safeAltitude * (1.0 + STEEP_TERRAIN_SIDE_MARGIN_FACTOR * Math.Abs(normal.X));
+            return (Vec)point + normal * clearance;
+        }
+
+        result.Add(OffsetWaypoint(surface[0], Normal(0, 1)));
 
         for (int i = 1; i < surface.Length - 1; i++)
         {
             Vec n = (Normal(i - 1, i) + Normal(i, i + 1)).Normalized();
-            result.Add((Vec)surface[i] + n * safeAltitude);
+            result.Add(OffsetWaypoint(surface[i], n));
         }
 
         int last = surface.Length - 1;
-        result.Add((Vec)surface[last] + Normal(last - 1, last) * safeAltitude);
+        result.Add(OffsetWaypoint(surface[last], Normal(last - 1, last)));
         return result;
     }
 

@@ -11,10 +11,10 @@ public class Program
         var goalTile = new Tile(Console.ReadLine().Trim());
 
         int n = int.Parse(Console.ReadLine() ?? "0");
-        var rows = new List<string[]>();
+        var rows = new List<string[]>(n);
         for (int i = 0; i < n; i++)
         {
-            rows.Add((Console.ReadLine() ?? "").Trim().Split(' '));
+            rows.Add((Console.ReadLine() ?? "").Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries));
         }
 
         var stopwatch = Stopwatch.StartNew();
@@ -92,25 +92,21 @@ public class RummikubSolver
     {
         var sb = new StringBuilder();
         sb.Append(tile.GetName()).Append('|');
-        var forbiddenKeys = forbiddenRows.Keys.OrderBy(k => k);
-        foreach (var key in forbiddenKeys)
+        if (forbiddenRows.Count != 0)
         {
-            sb.Append(key).Append(',');
+            var forbiddenKeys = new List<int>(forbiddenRows.Keys);
+            forbiddenKeys.Sort();
+            foreach (var key in forbiddenKeys) sb.Append(key).Append(',');
         }
-        sb.Append('|');
-        var rowKeys = table.GetRows().Keys.OrderBy(k => k);
-        foreach (var key in rowKeys)
-        {
-            sb.Append(key).Append(':').Append(table.GetRow(key).GetDisplay()).Append(';');
-        }
-        return sb.ToString();
+        return sb.Append('|').Append(table.GetStateKey()).ToString();
     }
 
-    private List<Tuple<Table, List<Action>>> CloneSolutions(IEnumerable<Tuple<Table, List<Action>>> solutions)
+    private List<Tuple<Table, List<Action>>> CloneSolutions(List<Tuple<Table, List<Action>>> solutions)
     {
-        var clonedList = new List<Tuple<Table, List<Action>>>();
-        foreach (var solution in solutions)
+        var clonedList = new List<Tuple<Table, List<Action>>>(solutions.Count);
+        for (var i = 0; i < solutions.Count; i++)
         {
+            var solution = solutions[i];
             clonedList.Add(Tuple.Create(solution.Item1.Clone(), new List<Action>(solution.Item2)));
         }
         return clonedList;
@@ -134,10 +130,11 @@ public class RummikubSolver
 
         foreach (var pair in solutions)
         {
+            int count = pair.Item2.Count;
+            if (count > bestCount) continue;
+
             var tableCandidate = pair.Item1;
             var actions = new List<Action>(pair.Item2);
-
-            int count = actions.Count;
             int firstCombine = int.MaxValue;
 
             for (int index = 0; index < actions.Count; index++)
@@ -153,7 +150,7 @@ public class RummikubSolver
                     var a3Row = actions[indexCombine - 1].RowID1;
 
                     bool disjoint = (combineAction.RowID1 != a2Row) && (combineAction.RowID2 != a2Row) &&
-                            (combineAction.RowID1 != a3Row) && (combineAction.RowID2 != a3Row);
+                                    (combineAction.RowID1 != a3Row) && (combineAction.RowID2 != a3Row);
 
                     if (!disjoint) break;
 
@@ -167,8 +164,6 @@ public class RummikubSolver
                 }
                 firstCombine = Math.Min(firstCombine, indexCombine);
             }
-
-            if (count > bestCount) continue;
 
             if (count == bestCount)
             {
@@ -242,8 +237,8 @@ public class RummikubSolver
 
                 var row = rows[rowID];
                 var could = row is Set set ? set.CouldInsert(tile)
-                     : row is Run run ? run.CouldInsert(tile)
-                     : new List<Tuple<ManipulationMethod, Tile>>();
+                          : row is Run run ? run.CouldInsert(tile)
+                          : new List<Tuple<ManipulationMethod, Tile>>();
 
                 foreach (var step in could)
                 {
@@ -353,8 +348,8 @@ public class RummikubSolver
 
                 var row = rows[rowID];
                 var could = row is Set set ? set.CouldTake(tile)
-                     : row is Run run ? run.CouldTake(tile)
-                     : new List<Tuple<ManipulationMethod, Tile>>();
+                          : row is Run run ? run.CouldTake(tile)
+                          : new List<Tuple<ManipulationMethod, Tile>>();
 
                 foreach (var step in could)
                 {
@@ -615,12 +610,12 @@ public abstract class Row
     public RowType Type { get; protected set; }
     public abstract int GetCount();
     public abstract string GetDisplay();
+    public abstract void AppendDisplay(StringBuilder sb);
     public abstract Row Clone();
 }
 
 public class Set : Row
 {
-    public Dictionary<string, Tile> Tiles { get; private set; } = new Dictionary<string, Tile>();
     public HashSet<TileColor> Colors { get; private set; } = new HashSet<TileColor>();
     public int Value { get; private set; }
 
@@ -632,7 +627,6 @@ public class Set : Row
         {
             Value = tile.Value ?? 0;
             Colors.Add(tile.Color);
-            Tiles[tile.GetName()] = tile;
         }
     }
 
@@ -641,32 +635,38 @@ public class Set : Row
         this.Type = RowType.Set;
         this.HasJoker = other.HasJoker;
         this.Value = other.Value;
-        this.Tiles = new Dictionary<string, Tile>(other.Tiles.Count);
-        foreach (var kvp in other.Tiles)
-        {
-            this.Tiles.Add(kvp.Key, new Tile(kvp.Value));
-        }
         this.Colors = new HashSet<TileColor>(other.Colors);
     }
 
     public override Row Clone() => new Set(this);
-    public override int GetCount() => Tiles.Count + (HasJoker ? 1 : 0);
+    public override int GetCount() => Colors.Count + (HasJoker ? 1 : 0);
 
     public override string GetDisplay()
     {
-        var output = new List<string>();
+        var sb = new StringBuilder();
+        AppendDisplay(sb);
+        return sb.ToString();
+    }
+
+    public override void AppendDisplay(StringBuilder sb)
+    {
+        var hasTile = false;
         foreach (var color in new[] { TileColor.B, TileColor.G, TileColor.R, TileColor.Y })
         {
-            if (Colors.Contains(color)) output.Add($"{Value}{Tile.ColorToString(color)}");
+            if (!Colors.Contains(color)) continue;
+            if (hasTile) sb.Append(' ');
+            sb.Append(Value).Append(Tile.ColorToString(color));
+            hasTile = true;
         }
-        if (HasJoker) output.Add("J");
-        return string.Join(" ", output);
+        if (!HasJoker) return;
+        if (hasTile) sb.Append(' ');
+        sb.Append('J');
     }
 
     public List<Tuple<ManipulationMethod, Tile>> CouldInsert(Tile tile)
     {
         var list = new List<Tuple<ManipulationMethod, Tile>>();
-        if (Tiles.Count == 0) return list;
+        if (Colors.Count == 0) return list;
 
         if ((tile.Value ?? -1) == Value && GetCount() == 4 && HasJoker && !Colors.Contains(tile.Color))
         {
@@ -680,7 +680,7 @@ public class Set : Row
     public List<Tuple<ManipulationMethod, Tile>> CouldTake(Tile tile)
     {
         var tiles = new List<Tuple<ManipulationMethod, Tile>>();
-        if (GetCount() == 4 || Tiles.Count == 0) return tiles;
+        if (GetCount() == 4 || Colors.Count == 0) return tiles;
 
         if (Value == (tile.Value ?? -1) && Colors.Contains(tile.Color))
         {
@@ -703,23 +703,14 @@ public class Set : Row
         return tiles;
     }
 
-    public void Insert(Tile tile)
-    {
-        Colors.Add(tile.Color);
-        Tiles[tile.GetName()] = tile;
-    }
+    public void Insert(Tile tile) => Colors.Add(tile.Color);
 
-    public void Remove(Tile tile)
-    {
-        Colors.Remove(tile.Color);
-        Tiles.Remove(tile.GetName());
-    }
+    public void Remove(Tile tile) => Colors.Remove(tile.Color);
 }
 
 public class Run : Row
 {
     private LinkedList<Tile> tileList = new LinkedList<Tile>();
-    private Dictionary<string, LinkedListNode<Tile>> tileMap = new Dictionary<string, LinkedListNode<Tile>>();
 
     public int Min { get; set; } = int.MaxValue;
     public int Max { get; set; } = int.MinValue;
@@ -732,8 +723,7 @@ public class Run : Row
         bool first = true;
         foreach (var tile in tiles.OrderBy(t => t.Value))
         {
-            var node = tileList.AddLast(tile);
-            tileMap[tile.GetName()] = node;
+            tileList.AddLast(tile);
             if (first)
             {
                 Color = tile.Color;
@@ -751,14 +741,8 @@ public class Run : Row
         this.Min = other.Min;
         this.Max = other.Max;
         this.Color = other.Color;
-        this.tileMap = new Dictionary<string, LinkedListNode<Tile>>(other.tileMap.Count);
         this.tileList = new LinkedList<Tile>();
-        foreach (var tile in other.tileList)
-        {
-            var newTile = new Tile(tile);
-            var node = this.tileList.AddLast(newTile);
-            this.tileMap[newTile.GetName()] = node;
-        }
+        foreach (var tile in other.tileList) this.tileList.AddLast(new Tile(tile));
     }
     public override Row Clone() => new Run(this);
     public override int GetCount() => tileList.Count + (HasJoker ? 1 : 0);
@@ -767,31 +751,40 @@ public class Run : Row
     private Run() { Type = RowType.Run; }
     public override string GetDisplay()
     {
-        var output = new List<string>();
+        var sb = new StringBuilder();
+        AppendDisplay(sb);
+        return sb.ToString();
+    }
+
+    public override void AppendDisplay(StringBuilder sb)
+    {
+        var hasTile = false;
         foreach (var tile in tileList)
         {
-            output.Add(tile.GetName());
+            if (hasTile) sb.Append(' ');
+            sb.Append(tile.GetName());
+            hasTile = true;
         }
-        if (HasJoker) output.Add("J");
-        return string.Join(" ", output);
+        if (!HasJoker) return;
+        if (hasTile) sb.Append(' ');
+        sb.Append('J');
     }
+
     public void InsertEnd(Tile tile)
     {
         Max = Math.Max(Max, tile.Value ?? Max);
-        var node = tileList.AddLast(tile);
-        tileMap[tile.GetName()] = node;
+        tileList.AddLast(new Tile(tile));
     }
+
     public void InsertStart(Tile tile)
     {
         Min = Math.Min(Min, tile.Value ?? Min);
-        var node = tileList.AddFirst(tile);
-        tileMap[tile.GetName()] = node;
+        tileList.AddFirst(new Tile(tile));
     }
     public Tile RemoveEnd()
     {
         Max--;
         var last = tileList.Last.Value;
-        tileMap.Remove(tileList.Last.Value.GetName());
         tileList.RemoveLast();
 
         if (tileList.Count > 0)
@@ -801,7 +794,6 @@ public class Run : Row
             {
                 HasJoker = true;
                 Max--;
-                tileMap.Remove(newLast.GetName());
                 tileList.RemoveLast();
             }
         }
@@ -811,7 +803,6 @@ public class Run : Row
     {
         Min++;
         var first = tileList.First.Value;
-        tileMap.Remove(tileList.First.Value.GetName());
         tileList.RemoveFirst();
 
         if (tileList.Count > 0)
@@ -821,7 +812,6 @@ public class Run : Row
             {
                 HasJoker = true;
                 Min++;
-                tileMap.Remove(newFirst.GetName());
                 tileList.RemoveFirst();
             }
         }
@@ -848,7 +838,7 @@ public class Run : Row
         if ((tile.Value ?? int.MaxValue) > Max + 1) tiles.Add(Tuple.Create(ManipulationMethod.Find, new Tile($"{Max + 1}{Tile.ColorToString(tile.Color)}")));
 
         if (tile.Value.HasValue && tile.Value.Value >= Min && tile.Value.Value <= Max &&
-          Math.Min(2, tile.Value.Value - Min) + Math.Min(2, Max - tile.Value.Value) + (HasJoker ? 1 : 0) < 4)
+            Math.Min(2, tile.Value.Value - Min) + Math.Min(2, Max - tile.Value.Value) + (HasJoker ? 1 : 0) < 4)
         {
             int lo = Math.Max(3, Math.Max(tile.Value.Value - (HasJoker ? 2 : 1), Min));
             int hi = Math.Min(11, Math.Min(tile.Value.Value + (HasJoker ? 2 : 1), Max));
@@ -918,7 +908,9 @@ public class Run : Row
 public class Table
 {
     private Dictionary<int, Row> rows = new Dictionary<int, Row>();
+    private List<int> rowIds = new List<int>();
     private int nextRow = 0;
+    private string stateKey;
 
     public Table(List<string[]> initialRows)
     {
@@ -959,31 +951,61 @@ public class Table
                 tiles.Add(tile);
             }
 
+            if (!rows.ContainsKey(rowID)) rowIds.Add(rowID);
             rows[rowID] = (colors.Count == 1) ? (Row)new Run(tiles, hasJoker) : new Set(tiles, hasJoker);
             nextRow = Math.Max(nextRow, rowID + 1);
         }
+        rowIds.Sort();
     }
 
     private Table() { }
     public Table Clone()
     {
-        var t = new Table { nextRow = this.nextRow };
-        t.rows = new Dictionary<int, Row>(this.rows.Count);
-        foreach (var kv in this.rows)
+        return new Table
         {
-            t.rows[kv.Key] = kv.Value.Clone();
-        }
-        return t;
+            rows = new Dictionary<int, Row>(rows),
+            rowIds = new List<int>(rowIds),
+            nextRow = nextRow,
+            stateKey = stateKey
+        };
     }
 
     public IReadOnlyDictionary<int, Row> GetRows() => rows;
+    public IReadOnlyList<int> GetRowIds() => rowIds;
     public Row GetRow(int rowID) => rows.TryGetValue(rowID, out var row) ? row : null;
+
+    public string GetStateKey()
+    {
+        if (stateKey != null) return stateKey;
+        var sb = new StringBuilder(rowIds.Count * 16);
+        foreach (var rowID in rowIds)
+        {
+            sb.Append(rowID).Append(':');
+            rows[rowID].AppendDisplay(sb);
+            sb.Append(';');
+        }
+        stateKey = sb.ToString();
+        return stateKey;
+    }
+
+    private void InvalidateStateKey() => stateKey = null;
+
+    private Row CloneRow(int rowID)
+    {
+        var row = rows[rowID].Clone();
+        rows[rowID] = row;
+        return row;
+    }
+
+    private Run CloneRun(int rowID) => (Run)CloneRow(rowID);
+
+    private Set CloneSet(int rowID) => (Set)CloneRow(rowID);
 
     public void Combine(int r1, int r2)
     {
-        var row1 = rows[r1] as Run;
+        var row1 = CloneRun(r1);
         var row2 = rows[r2] as Run;
-
+        InvalidateStateKey();
         if (row1.Max == row2.Min - 1)
         {
             foreach (var tile in row2.GetTiles()) row1.InsertEnd(tile);
@@ -993,18 +1015,19 @@ public class Table
             foreach (var tile in row2.GetTiles().Reverse()) row1.InsertStart(tile);
         }
         rows.Remove(r2);
+        rowIds.Remove(r2);
     }
     public List<int> Insert(int rowID, Tile tile)
     {
         var result = new List<int>();
-        if (!rows.ContainsKey(rowID)) return result;
-        var row = rows[rowID];
+        if (!rows.TryGetValue(rowID, out var row)) return result;
 
         if (tile.IsJoker)
         {
             if (row.GetCount() != (row.Type == RowType.Set ? 4 : 13))
             {
-                row.HasJoker = true;
+                InvalidateStateKey();
+                CloneRow(rowID).HasJoker = true;
                 result.Add(rowID);
             }
             return result;
@@ -1014,7 +1037,8 @@ public class Table
         {
             if (set.GetCount() != 4 && (tile.Value ?? -1) == set.Value && !set.Colors.Contains(tile.Color))
             {
-                set.Insert(tile);
+                InvalidateStateKey();
+                CloneSet(rowID).Insert(tile);
                 result.Add(rowID);
             }
         }
@@ -1022,28 +1046,34 @@ public class Table
         {
             if ((tile.Value ?? int.MinValue) == run.Min - 1)
             {
-                run.InsertStart(tile);
+                InvalidateStateKey();
+                CloneRun(rowID).InsertStart(tile);
                 result.Add(rowID);
             }
             else if ((tile.Value ?? int.MaxValue) == run.Max + 1)
             {
-                run.InsertEnd(tile);
+                InvalidateStateKey();
+                CloneRun(rowID).InsertEnd(tile);
                 result.Add(rowID);
             }
             else if (run.HasJoker && (tile.Value ?? int.MinValue) == run.Min - 2)
             {
+                InvalidateStateKey();
+                var updated = CloneRun(rowID);
                 var jokerTile = new Tile($"{(tile.Value.Value + 1)}{Tile.ColorToString(tile.Color)}", true);
-                run.InsertStart(jokerTile);
-                run.InsertStart(tile);
-                run.HasJoker = false;
+                updated.InsertStart(jokerTile);
+                updated.InsertStart(tile);
+                updated.HasJoker = false;
                 result.Add(rowID);
             }
             else if (run.HasJoker && (tile.Value ?? int.MaxValue) == run.Max + 2)
             {
+                InvalidateStateKey();
+                var updated = CloneRun(rowID);
                 var jokerTile = new Tile($"{(tile.Value.Value - 1)}{Tile.ColorToString(tile.Color)}", true);
-                run.InsertEnd(jokerTile);
-                run.InsertEnd(tile);
-                run.HasJoker = false;
+                updated.InsertEnd(jokerTile);
+                updated.InsertEnd(tile);
+                updated.HasJoker = false;
                 result.Add(rowID);
             }
             else
@@ -1051,25 +1081,31 @@ public class Table
                 var inside = run.GetTiles().FirstOrDefault(t => t.IsJoker && t.Value == tile.Value);
                 if (inside != null)
                 {
-                    inside.IsJoker = false;
-                    run.HasJoker = true;
+                    InvalidateStateKey();
+                    var updated = CloneRun(rowID);
+                    var updatedInside = updated.GetTiles().First(t => t.IsJoker && t.Value == tile.Value);
+                    updatedInside.IsJoker = false;
+                    updated.HasJoker = true;
                     result.Add(rowID);
                 }
                 else if ((tile.Value ?? int.MinValue) > run.Min && (tile.Value ?? int.MaxValue) < run.Max &&
-                    (Math.Min((tile.Value ?? 0) - run.Min, 2) + Math.Min(run.Max - (tile.Value ?? 0), 2) + (run.HasJoker ? 1 : 0) == 4))
+                         (Math.Min((tile.Value ?? 0) - run.Min, 2) + Math.Min(run.Max - (tile.Value ?? 0), 2) + (run.HasJoker ? 1 : 0) == 4))
                 {
+                    InvalidateStateKey();
+                    var updated = CloneRun(rowID);
                     var tilesRemoved = new List<Tile>();
-                    while (run.Max >= (tile.Value ?? 0))
-                        tilesRemoved.Add(run.RemoveEnd());
-                    run.InsertEnd(tile);
+                    while (updated.Max >= (tile.Value ?? 0))
+                        tilesRemoved.Add(updated.RemoveEnd());
+                    updated.InsertEnd(tile);
                     var newRun = new Run(tilesRemoved.AsEnumerable().Reverse(), false);
-                    if (run.HasJoker && tilesRemoved.Count == 2)
+                    if (updated.HasJoker && tilesRemoved.Count == 2)
                     {
-                        run.HasJoker = false;
+                        updated.HasJoker = false;
                         newRun.HasJoker = true;
                     }
                     int newRowID = nextRow++;
                     rows[newRowID] = newRun;
+                    rowIds.Add(newRowID);
                     result.Add(rowID);
                     result.Add(newRowID);
                 }
@@ -1080,39 +1116,36 @@ public class Table
 
     public void OutputRows()
     {
-        foreach (var kv in rows.OrderBy(k => k.Key))
-        {
-            Console.WriteLine($"{kv.Key} {kv.Value.GetDisplay()}");
-        }
+        foreach (var rowID in rowIds) Console.WriteLine($"{rowID} {rows[rowID].GetDisplay()}");
     }
     public bool Remove(int rowID, Tile tile)
     {
-        if (!rows.ContainsKey(rowID)) return false;
-        var row = rows[rowID];
+        if (!rows.TryGetValue(rowID, out var row)) return false;
 
         if (tile.IsJoker)
         {
             if (row.HasJoker && row.GetCount() >= 4)
             {
-                row.HasJoker = false;
+                InvalidateStateKey();
+                CloneRow(rowID).HasJoker = false;
                 return true;
             }
-            else if (row is Run run && row.GetCount() >= 7)
+            if (row is Run run && row.GetCount() >= 7)
             {
                 foreach (var rt in run.GetTiles())
                 {
-                    if (rt.IsJoker)
-                    {
-                        int val = rt.Value ?? 0;
-                        if (val - 3 >= run.Min && val + 3 <= run.Max)
-                        {
-                            var tiles = new List<Tile>();
-                            while (run.Max > (rt.Value ?? 0)) tiles.Add(run.RemoveEnd());
-                            run.HasJoker = false;
-                            rows[nextRow++] = new Run(tiles.AsEnumerable().Reverse(), false);
-                            return true;
-                        }
-                    }
+                    if (!rt.IsJoker) continue;
+                    int value = rt.Value ?? 0;
+                    if (value - 3 < run.Min || value + 3 > run.Max) continue;
+                    InvalidateStateKey();
+                    var updated = CloneRun(rowID);
+                    var tiles = new List<Tile>();
+                    while (updated.Max > value) tiles.Add(updated.RemoveEnd());
+                    updated.HasJoker = false;
+                    int newRowID = nextRow++;
+                    rows[newRowID] = new Run(tiles.AsEnumerable().Reverse(), false);
+                    rowIds.Add(newRowID);
+                    return true;
                 }
             }
             return false;
@@ -1122,37 +1155,43 @@ public class Table
         {
             if (set.GetCount() == 4 && set.Value == (tile.Value ?? -1) && set.Colors.Contains(tile.Color))
             {
-                set.Remove(tile);
+                InvalidateStateKey();
+                CloneSet(rowID).Remove(tile);
                 return true;
             }
         }
-        else if (row is Run run2 && run2.Color == tile.Color)
+        else if (row is Run run && run.Color == tile.Color)
         {
-            if (row.GetCount() >= 4 && (tile.Value ?? int.MinValue) == run2.Min)
+            if (row.GetCount() >= 4 && (tile.Value ?? int.MinValue) == run.Min)
             {
-                run2.RemoveStart();
+                InvalidateStateKey();
+                CloneRun(rowID).RemoveStart();
                 return true;
             }
-            else if (row.GetCount() >= 4 && (tile.Value ?? int.MinValue) == run2.Max)
+            if (row.GetCount() >= 4 && (tile.Value ?? int.MinValue) == run.Max)
             {
-                run2.RemoveEnd();
+                InvalidateStateKey();
+                CloneRun(rowID).RemoveEnd();
                 return true;
             }
-            else if (row.GetCount() >= 7 &&
-                (tile.Value ?? 0) - 3 >= run2.Min &&
-                (tile.Value ?? 0) + 3 <= run2.Max)
+            if (row.GetCount() >= 7 &&
+                (tile.Value ?? 0) - 3 >= run.Min &&
+                (tile.Value ?? 0) + 3 <= run.Max)
             {
+                InvalidateStateKey();
+                var updated = CloneRun(rowID);
                 var tiles = new List<Tile>();
-                while (run2.Max > (tile.Value ?? 0)) tiles.Add(run2.RemoveEnd());
-
-                run2.RemoveEnd();
-
-                rows[nextRow++] = new Run(tiles.AsEnumerable().Reverse(), false);
+                while (updated.Max > (tile.Value ?? 0)) tiles.Add(updated.RemoveEnd());
+                updated.RemoveEnd();
+                int newRowID = nextRow++;
+                rows[newRowID] = new Run(tiles.AsEnumerable().Reverse(), false);
+                rowIds.Add(newRowID);
                 return true;
             }
         }
         return false;
     }
+
 }
 
 public class Tile

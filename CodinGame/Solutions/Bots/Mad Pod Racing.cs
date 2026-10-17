@@ -1,409 +1,629 @@
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.Linq;
+using System.IO;
+using System.Runtime.CompilerServices;
 
 class Player
 {
-    static class C
-    {
-        public const int SIMULATIONTURNS = 6;
-        public const int SOLUTIONCOUNT = 8;
-        public const int maxThrust = 200;
-        public const int boostThrust = 650;
-        public const int maxRotation = 18;
-        public const int shieldCooldown = 4;
-        public const float checkpointRadius = 600f;
-        public const float checkpointRadiusSqr = checkpointRadius * checkpointRadius;
-        public const float podRadius = 400f;
-        public const float podRadiusSqr = podRadius * podRadius;
-        public const float minImpulse = 120f;
-        public const float frictionFactor = 0.85f;
-        public const int timeoutFirstTurn = 950;
-        public const int timeout = 70;
-        public const float PI = 3.1415926535f;
-    }
-
-    public struct Vector2
-    {
-        public float x; public float y;
-        public Vector2(float x, float y) { this.x = x; this.y = y; }
-        public Vector2 Normalized()
-        {
-            float norm = (float)Math.Sqrt(x * x + y * y);
-            if (norm < 1e-6f) return new Vector2(1, 0);
-            return new Vector2(x / norm, y / norm);
-        }
-        public static Vector2 operator +(Vector2 a, Vector2 b) => new Vector2(a.x + b.x, a.y + b.y);
-        public static Vector2 operator -(Vector2 a, Vector2 b) => new Vector2(a.x - b.x, a.y - b.y);
-        public static Vector2 operator *(float k, Vector2 a) => new Vector2(k * a.x, k * a.y);
-        public static float DistSqr(Vector2 a, Vector2 b) => (a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y);
-        public static float Dist(Vector2 a, Vector2 b) => (float)Math.Sqrt(DistSqr(a, b));
-        public static float Dot(Vector2 a, Vector2 b) => a.x * b.x + a.y * b.y;
-    }
+    const int Horizon = 8;
+    const int Population = 8;
+    const int Shield = -1;
+    const int Boost = -2;
+    const double Deg = Math.PI / 180.0;
+    static readonly double[] Cos = new double[360];
+    static readonly double[] Sin = new double[360];
+    static readonly Plan[] Pool = new Plan[Population];
+    static double[] Prefix;
+    static readonly double[] CpX = new double[8];
+    static readonly double[] CpY = new double[8];
+    static readonly bool Trace = Environment.GetEnvironmentVariable("MPR_TRACE") == "1";
+    static readonly int FixedEvaluations = ReadOption("MPR_EVALS", 0);
+    static readonly int Strategy = ReadOption("MPR_STRATEGY", 1);
+    static readonly int Budget = ReadOption("MPR_MS", 55);
+    static int Count;
+    static int Finish;
+    static int Turn;
+    static int Racer;
+    static int Enemy;
+    static int Evaluations;
+    static bool Attack;
+    static uint RandomState = 2463534242;
+    static World Current;
+    static Plan Scratch = new Plan();
 
     public struct Pod
     {
-        public Vector2 position; public Vector2 speed; public int angle;
-        public int checkpointId; public int checkpointsPassed;
-        public bool canBoost; public int shieldCd; public int score;
-        public int id;
+        public double X;
+        public double Y;
+        public double Vx;
+        public double Vy;
+        public int Angle;
+        public int Next;
+        public int Passed;
+        public int Cooldown;
+    }
+
+    public struct World
+    {
+        public Pod A;
+        public Pod B;
+        public Pod C;
+        public Pod D;
+        public bool Used;
+        public bool EnemyUsed;
     }
 
     public struct Move
     {
-        public int rotation; public int thrust; public bool shield; public bool boost;
-    }
+        public int Rotation;
+        public int Power;
 
-    public struct Turn
-    {
-        public Move move0; public Move move1;
-        public Move this[int m]
+        public Move(int rotation, int power)
         {
-            get => (m == 0) ? move0 : move1;
-            set { if (m == 0) move0 = value; else move1 = value; }
+            Rotation = rotation;
+            Power = power;
         }
     }
 
-    public class Solution
+    class Plan
     {
-        private readonly Turn[] turns = new Turn[C.SIMULATIONTURNS];
-        public int score = int.MinValue;
-        public void CopyFrom(Solution other)
-        {
-            this.score = other.score;
-            for (int t = 0; t < C.SIMULATIONTURNS; t++) this.turns[t] = other.turns[t];
-        }
-        public Turn this[int t] { get => turns[t]; set => turns[t] = value; }
+        public readonly Move[] Moves = new Move[Horizon * 2];
+        public readonly World[] States = new World[Horizon + 1];
+        public readonly double[] Values = new double[Horizon + 1];
+        public double Score;
     }
 
-    public class Simulation
+    static void Main()
     {
-        private readonly List<Vector2> checkpoints;
-        private readonly int checkpointCount;
-        private readonly int maxCheckpoints;
-        public static readonly float[] CosLUT = new float[360];
-        public static readonly float[] SinLUT = new float[360];
-        static Simulation()
+        var input = new Reader();
+        int laps = input.NextInt();
+        if (laps == int.MinValue) return;
+        Count = input.NextInt();
+        Finish = laps * Count;
+        Prefix = new double[Finish + Horizon + Count + 2];
+        for (int i = 0; i < Count; i++)
         {
-            for (int i = 0; i < 360; i++)
-            {
-                float angleRad = i * C.PI / 180f;
-                CosLUT[i] = (float)Math.Cos(angleRad);
-                SinLUT[i] = (float)Math.Sin(angleRad);
-            }
+            CpX[i] = input.NextInt();
+            CpY[i] = input.NextInt();
         }
-        public int MaxCheckpoints() => maxCheckpoints;
-        public List<Vector2> Checkpoints() => checkpoints;
-        public Simulation()
+        for (int i = 0; i < 360; i++)
         {
-            int laps = int.Parse(Console.ReadLine());
-            checkpointCount = int.Parse(Console.ReadLine());
-            maxCheckpoints = laps * checkpointCount;
-            checkpoints = new List<Vector2>(checkpointCount);
-            for (int i = 0; i < checkpointCount; i++)
-            {
-                string[] inputs = Console.ReadLine().Split(' ');
-                checkpoints.Add(new Vector2(int.Parse(inputs[0]), int.Parse(inputs[1])));
-            }
+            Cos[i] = Math.Cos(i * Deg);
+            Sin[i] = Math.Sin(i * Deg);
         }
-        public void PlaySolution(List<Pod> pods, Solution s)
+        for (int i = 1; i < Prefix.Length; i++)
         {
-            for (int i = 0; i < C.SIMULATIONTURNS; i++) PlayOneTurn(pods, s[i]);
+            int a = i % Count;
+            int b = (a + 1) % Count;
+            Prefix[i] = Prefix[i - 1] + Length(CpX[a] - CpX[b], CpY[a] - CpY[b]);
         }
-        private void PlayOneTurn(List<Pod> pods, Turn turn)
-        {
-            Rotate(pods, turn); Accelerate(pods, turn); UpdatePositions(pods); Friction(pods); EndTurn(pods);
-        }
-        private void Rotate(List<Pod> pods, Turn turn)
-        {
-            for (int i = 0; i < 2; i++) { Pod p = pods[i]; p.angle += turn[i].rotation; pods[i] = p; }
-        }
-        private void Accelerate(List<Pod> pods, Turn turn)
-        {
-            for (int i = 0; i < 2; i++)
-            {
-                Pod p = pods[i]; Move m = turn[i]; ManageShield(m.shield, ref p);
-                if (p.shieldCd <= 0)
-                {
-                    int angleNorm = p.angle % 360; if (angleNorm < 0) angleNorm += 360;
-                    var direction = new Vector2(CosLUT[angleNorm], SinLUT[angleNorm]);
-                    bool useBoost = p.canBoost && m.boost; int thrust = useBoost ? C.boostThrust : m.thrust;
-                    if (useBoost) p.canBoost = false;
-                    p.speed += thrust * direction;
-                }
-                pods[i] = p;
-            }
-        }
-        private void UpdatePositions(List<Pod> pods)
-        {
-            float t = 0f;
-            while (t < 1.0f)
-            {
-                int a_idx = -1; int b_idx = -1; float dt = 1.0f - t;
-                for (int i = 0; i < 4; i++) for (int j = i + 1; j < 4; j++)
-                    {
-                        float collisionTime = CollisionTime(pods[i], pods[j]);
-                        if ((collisionTime > 0f) && (t + collisionTime < 1.0f) && (collisionTime < dt)) { dt = collisionTime; a_idx = i; b_idx = j; }
-                    }
-                for (int i = 0; i < pods.Count; i++)
-                {
-                    Pod p = pods[i];
-                    p.position += dt * p.speed;
-                    while (Vector2.DistSqr(p.position, checkpoints[p.checkpointId]) < C.checkpointRadiusSqr)
-                    {
-                        p.checkpointsPassed++;
-                        p.checkpointId = (p.checkpointId + 1) % checkpointCount;
-                    }
-                    pods[i] = p;
-                }
-                if (a_idx != -1) Rebound(pods, a_idx, b_idx);
-                t += dt;
-            }
-        }
-        private void Friction(List<Pod> pods)
-        {
-            for (int i = 0; i < pods.Count; i++) { Pod p = pods[i]; p.speed.x *= C.frictionFactor; p.speed.y *= C.frictionFactor; pods[i] = p; }
-        }
-        private void EndTurn(List<Pod> pods)
-        {
-            for (int i = 0; i < pods.Count; i++)
-            {
-                Pod p = pods[i]; p.speed.x = (int)p.speed.x; p.speed.y = (int)p.speed.y;
-                p.position.x = (float)Math.Round(p.position.x);
-                p.position.y = (float)Math.Round(p.position.y);
-                pods[i] = p;
-            }
-        }
-        private static void ManageShield(bool turnOn, ref Pod p) { if (turnOn) p.shieldCd = C.shieldCooldown; else if (p.shieldCd > 0) --p.shieldCd; }
-        private static int Mass(in Pod p) => p.shieldCd == C.shieldCooldown ? 10 : 1;
-        private static float CollisionTime(Pod p1, Pod p2)
-        {
-            var dP = p2.position - p1.position; var dS = p2.speed - p1.speed; float a = Vector2.Dot(dS, dS);
-            if (a < 1e-6f) return float.PositiveInfinity; float b = 2f * Vector2.Dot(dP, dS); float c = Vector2.Dot(dP, dP) - 4f * C.podRadiusSqr;
-            float delta = b * b - 4f * a * c; if (delta < 0f) return float.PositiveInfinity;
-            float t = (-b - (float)Math.Sqrt(delta)) / (2f * a); return t <= 1e-6f ? float.PositiveInfinity : t;
-        }
-        private static void Rebound(List<Pod> pods, int idxA, int idxB)
-        {
-            Pod a = pods[idxA]; Pod b = pods[idxB]; float mA = Mass(a); float mB = Mass(b); var dP = b.position - a.position;
-            float abDist = Vector2.Dist(a.position, b.position); if (abDist < 1.0f) abDist = 1.0f; var u = (1f / abDist) * dP;
-            var dS = b.speed - a.speed; float m = (mA * mB) / (mA + mB); float k = Vector2.Dot(dS, u);
-            if (k > 0) return;
-            float impulse = -2f * m * k;
-            if (impulse < C.minImpulse) impulse = C.minImpulse;
-            var impulseVec = impulse * u;
-            a.speed -= (1f / mA) * impulseVec; b.speed += (1f / mB) * impulseVec; pods[idxA] = a; pods[idxB] = b;
-        }
-    }
-
-    class Solver
-    {
-        private readonly List<Solution> solutions;
-        private readonly Simulation sim;
-        private readonly List<Pod> simulationPods;
-        private static uint g_seed = (uint)DateTime.Now.Ticks;
-        public Solver(Simulation parSimulation)
-        {
-            sim = parSimulation; solutions = new List<Solution>(2 * C.SOLUTIONCOUNT);
-            simulationPods = new List<Pod>(4); InitPopulation();
-            FirstTurnBoostHack();
-        }
-        public Solution Solve(List<Pod> pods, int time)
-        {
-            var stopwatch = Stopwatch.StartNew();
-            for (int i = 0; i < C.SOLUTIONCOUNT; ++i) { ShiftByOneTurn(solutions[i]); ComputeScore(solutions[i], pods); }
-            int step = 0;
-            while (stopwatch.ElapsedMilliseconds < time)
-            {
-                for (int i = 0; i < C.SOLUTIONCOUNT; ++i)
-                {
-                    solutions[C.SOLUTIONCOUNT + i].CopyFrom(solutions[i]);
-                    Mutate(solutions[C.SOLUTIONCOUNT + i]);
-                    ComputeScore(solutions[C.SOLUTIONCOUNT + i], pods);
-                }
-                solutions.Sort((a, b) => b.score.CompareTo(a.score));
-                ++step;
-            }
-            return solutions[0];
-        }
-        private static int FastRand() { g_seed = (214013 * g_seed + 2531011); return (int)((g_seed >> 16) & 0x7FFF); }
-        private static int Rnd(int a, int b) => (FastRand() % (b - a)) + a;
-        private void InitPopulation()
-        {
-            for (int i = 0; i < 2 * C.SOLUTIONCOUNT; ++i) solutions.Add(new Solution());
-            for (int s = 0; s < C.SOLUTIONCOUNT; s++) for (int t = 0; t < C.SIMULATIONTURNS; t++)
-                {
-                    var turn = solutions[s][t]; Randomize(ref turn.move0); Randomize(ref turn.move1); solutions[s][t] = turn;
-                }
-        }
-        private void FirstTurnBoostHack()
-        {
-            float d = Vector2.DistSqr(sim.Checkpoints()[0], sim.Checkpoints()[1]);
-            if (d < 9000000f) return;
-            for (int s = 0; s < C.SOLUTIONCOUNT; ++s)
-            {
-                var turn = solutions[s][0]; turn.move0.boost = true; turn.move1.boost = false; solutions[s][0] = turn;
-            }
-        }
-        private void Randomize(ref Move m, bool modifyAll = true)
-        {
-            const int pRot = 10, pThrust = pRot + 8, pShield = pThrust + 1;
-            int choice = modifyAll ? -1 : Rnd(0, pShield);
-            if (choice == -1 || choice < pRot) m.rotation = Rnd(-C.maxRotation, C.maxRotation + 1);
-            if (choice == -1 || (choice >= pRot && choice < pThrust)) m.thrust = Rnd(0, C.maxThrust + 1);
-            if (choice == -1 || choice >= pThrust) m.shield = Rnd(0, 10) > 8;
-        }
-        private void ShiftByOneTurn(Solution s)
-        {
-            for (int t = 0; t < C.SIMULATIONTURNS - 1; t++) s[t] = s[t + 1];
-            var newTurn = new Turn(); Randomize(ref newTurn.move0); Randomize(ref newTurn.move1); s[C.SIMULATIONTURNS - 1] = newTurn;
-        }
-        private void Mutate(Solution s)
-        {
-            int t = Rnd(0, C.SIMULATIONTURNS);
-            int i = Rnd(0, 2);
-            Turn turn = s[t]; Move move = turn[i]; Randomize(ref move, false); turn[i] = move; s[t] = turn;
-        }
-        private int ComputeScore(Solution sol, List<Pod> pods)
-        {
-            simulationPods.Clear();
-            for (int i = 0; i < pods.Count; i++) simulationPods.Add(pods[i]);
-            sim.PlaySolution(simulationPods, sol);
-            sol.score = RateSolution(simulationPods); return sol.score;
-        }
-        private int RateSolution(List<Pod> pods)
-        {
-            for (int i = 0; i < pods.Count; i++)
-            {
-                Pod p = pods[i]; const int cpFactor = 50000;
-                float distToCp = Vector2.Dist(p.position, sim.Checkpoints()[p.checkpointId]);
-                p.score = cpFactor * p.checkpointsPassed - (int)distToCp; pods[i] = p;
-            }
-            Pod myPod0 = pods[0];
-            Pod myPod1 = pods[1];
-            Pod oppPod0 = pods[2];
-            Pod oppPod1 = pods[3];
-
-            Pod myRacer = (myPod0.score > myPod1.score) ? myPod0 : myPod1;
-            Pod myBlocker = (myPod0.score > myPod1.score) ? myPod1 : myPod0;
-            Pod opponentRacer = (oppPod0.score > oppPod1.score) ? oppPod0 : oppPod1;
-
-            if (myRacer.checkpointsPassed >= sim.MaxCheckpoints()) return int.MaxValue;
-            if (opponentRacer.checkpointsPassed >= sim.MaxCheckpoints()) return int.MinValue;
-
-            int racerScore = myRacer.score * 10;
-            Vector2 nextCpPos = sim.Checkpoints()[myRacer.checkpointId];
-            Vector2 dirToNextCp = (nextCpPos - myRacer.position).Normalized();
-            racerScore += (int)(Vector2.Dot(myRacer.speed, dirToNextCp) * 0.5f);
-
-            int leadScore = (myRacer.score - opponentRacer.score) * 100;
-
-            int blockerScore = 0;
-            Vector2 opponentNextCpPos = sim.Checkpoints()[opponentRacer.checkpointId];
-            Vector2 targetVector = (opponentNextCpPos - opponentRacer.position).Normalized();
-            Vector2 interceptPoint = opponentRacer.position + 300f * targetVector;
-            blockerScore -= (int)Vector2.Dist(myBlocker.position, interceptPoint);
-            blockerScore -= (int)Vector2.Dist(myBlocker.position, opponentRacer.position);
-            if (myBlocker.shieldCd > 0 && Vector2.DistSqr(myBlocker.position, opponentRacer.position) < (C.podRadius * 2.5f) * (C.podRadius * 2.5f))
-            {
-                blockerScore += 40000;
-                blockerScore += (int)(Math.Sqrt(Vector2.Dot(opponentRacer.speed, opponentRacer.speed)) * 2);
-            }
-
-            int friendlyFirePenalty = 0;
-            float distSqrBetweenFriends = Vector2.DistSqr(myRacer.position, myBlocker.position);
-            if (distSqrBetweenFriends < (C.podRadius * 4.0f) * (C.podRadius * 4.0f))
-            {
-                Vector2 racerToCpVec = (nextCpPos - myRacer.position).Normalized();
-                Vector2 racerToBlockerVec = myBlocker.position - myRacer.position;
-                float dot = Vector2.Dot(racerToBlockerVec.Normalized(), racerToCpVec);
-
-                if (dot > 0.5f)
-                {
-                    friendlyFirePenalty += (int)(200000 * dot / Math.Sqrt(distSqrBetweenFriends));
-                }
-
-                float speedDot = Vector2.Dot(myRacer.speed.Normalized(), racerToCpVec);
-                if (speedDot < 0.2f)
-                {
-                    friendlyFirePenalty += 50000;
-                }
-            }
-            return leadScore + racerScore + blockerScore - friendlyFirePenalty;
-        }
-    }
-
-    static void ConvertSolutionToOutput(Solution sol, List<Pod> pods)
-    {
-        for (int i = 0; i < 2; i++)
-        {
-            var p = pods[i]; var m = sol[0][i]; int angle = p.angle + m.rotation; int angleNorm = angle % 360; if (angleNorm < 0) angleNorm += 360;
-            var dir = new Vector2(Simulation.CosLUT[angleNorm], Simulation.SinLUT[angleNorm]); var target = p.position + 10000f * dir;
-            Console.Write((int)Math.Round(target.x) + " " + (int)Math.Round(target.y) + " ");
-            if (m.shield && p.shieldCd <= 0) Console.WriteLine("SHIELD");
-            else
-               if (m.boost && p.canBoost) Console.WriteLine("BOOST");
-            else Console.WriteLine(m.thrust);
-        }
-    }
-    static void UpdatePodsShieldBoostForNextTurn(Solution sol, List<Pod> pods)
-    {
-        for (int i = 0; i < 2; i++)
-        {
-            Pod p = pods[i]; Move m = sol[0][i];
-            if (m.boost && p.canBoost && p.shieldCd <= 0) p.canBoost = false;
-            if (m.shield && p.shieldCd <= 0) p.shieldCd = C.shieldCooldown;
-            else if (p.shieldCd > 0) --p.shieldCd;
-            pods[i] = p;
-        }
-    }
-    static void OverrideAngle(ref Pod p, Vector2 target)
-    {
-        var dir = (target - p.position).Normalized(); float clampedX = Math.Clamp(dir.x, -1f, 1f);
-        float a = (float)(Math.Acos(clampedX) * 180.0 / C.PI); if (dir.y < 0) a = 360f - a; p.angle = (int)a;
-    }
-    static Pod UpdatePodFromInput(Pod existingPod, int turn)
-    {
-        string[] inputs = Console.ReadLine().Split(' '); var newPod = existingPod;
-        newPod.position = new Vector2(int.Parse(inputs[0]), int.Parse(inputs[1])); newPod.speed = new Vector2(int.Parse(inputs[2]), int.Parse(inputs[3]));
-        newPod.angle = int.Parse(inputs[4]); int nextCPId = int.Parse(inputs[5]);
-        if (turn > 0 && existingPod.checkpointId != nextCPId)
-        {
-            newPod.checkpointsPassed++;
-        }
-        newPod.checkpointId = nextCPId;
-        return newPod;
-    }
-    static string GetActionString(Move m, Pod p)
-    {
-        if (m.shield && p.shieldCd <= 0) return "SHIELD";
-        if (m.boost && p.canBoost) return "BOOST";
-        return m.thrust.ToString();
-    }
-    static void Main(string[] args)
-    {
-        var simulation = new Simulation(); var solver = new Solver(simulation);
-        var pods = new List<Pod>(4) { new Pod { id = 0, canBoost = true }, new Pod { id = 1, canBoost = true }, new Pod { id = 2, canBoost = true }, new Pod { id = 3, canBoost = true } };
-        int step = 0;
+        for (int i = 0; i < Population; i++) Pool[i] = new Plan();
         while (true)
         {
-            for (int i = 0; i < 4; i++) pods[i] = UpdatePodFromInput(pods[i], step);
-            if (step == 0)
+            World old = Current;
+            for (int i = 0; i < 4; i++)
             {
-                Vector2 firstCP = simulation.Checkpoints()[1];
-                for (int i = 0; i < 2; i++) { Pod p = pods[i]; OverrideAngle(ref p, firstCP); pods[i] = p; }
+                ref Pod p = ref At(ref Current, i);
+                int x = input.NextInt();
+                if (x == int.MinValue) return;
+                int previous = p.Next;
+                p.X = x;
+                p.Y = input.NextInt();
+                p.Vx = input.NextInt();
+                p.Vy = input.NextInt();
+                p.Angle = input.NextInt();
+                p.Next = input.NextInt();
+                if (Turn > 0) p.Passed += (p.Next - previous + Count) % Count;
+                if (p.Angle < 0) p.Angle = Normalize((int)Math.Round(Math.Atan2(CpY[p.Next] - p.Y, CpX[p.Next] - p.X) / Deg));
+                p.Angle = Normalize(p.Angle);
             }
-            int time = (step == 0) ? C.timeoutFirstTurn : C.timeout;
-            Solution s = solver.Solve(pods, time);
+            long start = Stopwatch.GetTimestamp();
+            if (Turn > 0) InferOpponent(in old);
+            Racer = Progress(in Current.A) >= Progress(in Current.B) ? 0 : 1;
+            Enemy = Progress(in Current.C) >= Progress(in Current.D) ? 2 : 3;
+            ref Pod lead = ref At(ref Current, Racer);
+            ref Pod support = ref At(ref Current, 1 - Racer);
+            Attack = Strategy != 0 && Progress(in lead) - Progress(in support) > 2200;
+            Plan best = Search(start);
+            for (int i = 0; i < 2; i++)
+            {
+                ref Pod p = ref At(ref Current, i);
+                Move move = best.Moves[i];
+                int angle = Normalize(p.Angle + move.Rotation);
+                int x = (int)Math.Floor(p.X + Cos[angle] * 100000 + 0.5);
+                int y = (int)Math.Floor(p.Y + Sin[angle] * 100000 + 0.5);
+                string power;
+                if (move.Power == Shield)
+                {
+                    power = "SHIELD";
+                    p.Cooldown = 4;
+                }
+                else if (move.Power == Boost && !Current.Used)
+                {
+                    power = "BOOST";
+                    Current.Used = true;
+                }
+                else power = Math.Max(0, move.Power == Boost ? 200 : move.Power).ToString();
+                if (p.Cooldown > 0) p.Cooldown--;
+                Console.WriteLine(x + " " + y + " " + power);
+            }
+            if (Trace) Console.Error.WriteLine("turn=" + Turn + " ms=" + ((Stopwatch.GetTimestamp() - start) * 1000.0 / Stopwatch.Frequency).ToString("F3", System.Globalization.CultureInfo.InvariantCulture) + " evals=" + Evaluations + " score=" + best.Score.ToString("F1", System.Globalization.CultureInfo.InvariantCulture));
+            Turn++;
+        }
+    }
 
-            Console.Error.WriteLine($"[DEBUG] Best Score: {s.score}");
-            Console.Error.WriteLine($"[DEBUG] Pod 0 Action: {GetActionString(s[0][0], pods[0])}");
-            Console.Error.WriteLine($"[DEBUG] Pod 1 Action: {GetActionString(s[0][1], pods[1])}");
+    static Plan Search(long start)
+    {
+        Evaluations = 0;
+        if (Turn > 0)
+        {
+            for (int i = 0; i < Population; i++)
+            {
+                Array.Copy(Pool[i].Moves, 2, Pool[i].Moves, 0, (Horizon - 1) * 2);
+                Evaluate(Pool[i], null, 0, -2);
+            }
+        }
+        else
+        {
+            for (int i = 0; i < Population; i++) Evaluate(Pool[i], null, 0, i);
+        }
+        for (int i = 0; i < 4; i++)
+        {
+            Evaluate(Scratch, null, 0, i);
+            Insert(-1, 0);
+        }
+        long limit = start + (long)((Turn == 0 ? 800 : Budget) * (Stopwatch.Frequency / 1000.0));
+        int iterations = 0;
+        while (FixedEvaluations > 0 ? Evaluations < FixedEvaluations : Stopwatch.GetTimestamp() < limit)
+        {
+            int parent = Random(Population);
+            if ((iterations & 3) == 0) parent = BestIndex();
+            Plan source = Pool[parent];
+            Array.Copy(source.Moves, Scratch.Moves, Horizon * 2);
+            int first = Horizon;
+            int mutations = 1 + Random(3);
+            for (int m = 0; m < mutations; m++)
+            {
+                int t = Random(Horizon);
+                if (Random(4) == 0) t = Random(Math.Min(4, Horizon));
+                int pod = Random(2);
+                int index = t * 2 + pod;
+                Move a = Scratch.Moves[index];
+                int kind = Random(12);
+                if (kind < 7)
+                {
+                    a.Rotation = Clamp(a.Rotation + (Random(2) == 0 ? -1 : 1) * (1 + Random(12)), -18, 18);
+                    if (kind == 0) a.Rotation = Random(3) * 18 - 18;
+                }
+                else if (kind < 10) a.Power = Random(5) * 50;
+                else if (kind == 10) a.Power = Random(4) == 0 ? Shield : 200;
+                else a.Power = Boost;
+                Scratch.Moves[index] = a;
+                if (t < first) first = t;
+                if (kind == 1 && t + 1 < Horizon)
+                {
+                    Scratch.Moves[index + 2].Rotation = a.Rotation;
+                }
+            }
+            Evaluate(Scratch, source, first, -1);
+            Insert(parent, first);
+            iterations++;
+        }
+        return Pool[BestIndex()];
+    }
 
-            ConvertSolutionToOutput(s, pods);
-            UpdatePodsShieldBoostForNextTurn(s, pods);
-            step++;
+    static void Insert(int parent, int first)
+    {
+        int worst = 0;
+        for (int i = 1; i < Population; i++) if (Pool[i].Score < Pool[worst].Score) worst = i;
+        if (Scratch.Score <= Pool[worst].Score) return;
+        if (parent >= 0 && first > 0)
+        {
+            Array.Copy(Pool[parent].States, Scratch.States, first);
+            Array.Copy(Pool[parent].Values, Scratch.Values, first);
+        }
+        Plan temporary = Pool[worst];
+        Pool[worst] = Scratch;
+        Scratch = temporary;
+    }
+
+    static void Evaluate(Plan plan, Plan parent, int first, int seed)
+    {
+        World state = parent == null ? Current : parent.States[first];
+        double sum = parent == null ? 0 : parent.Values[first];
+        for (int t = first; t < Horizon; t++)
+        {
+            plan.States[t] = state;
+            plan.Values[t] = sum;
+            Move a;
+            Move b;
+            if (seed >= 0 || seed == -2 && t == Horizon - 1)
+            {
+                a = Policy(in state, 0, seed < 0 ? 1 : seed);
+                b = Policy(in state, 1, seed < 0 ? 1 : seed);
+                plan.Moves[t * 2] = a;
+                plan.Moves[t * 2 + 1] = b;
+            }
+            else
+            {
+                a = plan.Moves[t * 2];
+                b = plan.Moves[t * 2 + 1];
+            }
+            Move c = Drive(in state.C, 1, false);
+            Move d = Drive(in state.D, 1, false);
+            Step(ref state, a, b, c, d, 302500);
+            double value = EvaluateState(in state);
+            sum += value * 0.035;
+            if (state.A.Passed >= Finish || state.B.Passed >= Finish)
+            {
+                sum += 10000000 + (Horizon - t) * 100000;
+            }
+            if (state.C.Passed >= Finish || state.D.Passed >= Finish)
+            {
+                sum -= 15000000 + (Horizon - t) * 100000;
+            }
+        }
+        plan.States[Horizon] = state;
+        plan.Values[Horizon] = sum;
+        plan.Score = EvaluateState(in state) + sum;
+        Evaluations++;
+    }
+
+    static Move Policy(in World state, int id, int style)
+    {
+        Pod p = id == 0 ? state.A : state.B;
+        if (Attack && id != Racer && style != 3) return Intercept(in state, in p);
+        Move move = Drive(in p, style, !state.Used && id == Racer);
+        if (style == 2 && !state.Used && id == Racer && p.Cooldown == 0 && Math.Abs(move.Rotation) < 9) move.Power = Boost;
+        return move;
+    }
+
+    static Move Drive(in Pod p, int style, bool boost)
+    {
+        int next = p.Next;
+        double x = CpX[next];
+        double y = CpY[next];
+        double dx = x - p.X;
+        double dy = y - p.Y;
+        double distance = Length(dx, dy);
+        double speed = Length(p.Vx, p.Vy);
+        double drift = style == 0 ? 2.0 : style == 2 ? 4.0 : 3.0;
+        int following = next + 1 == Count ? 0 : next + 1;
+        if (Swept(p.X, p.Y, p.X + p.Vx, p.Y + p.Vy, next, 302500) && p.Passed + 1 < Finish)
+        {
+            x = CpX[following];
+            y = CpY[following];
+            drift = 2.0;
+        }
+        else if (style != 0)
+        {
+            double ox = CpX[following] - x;
+            double oy = CpY[following] - y;
+            double length = Length(ox, oy);
+            x += ox * 220.0 / length;
+            y += oy * 220.0 / length;
+        }
+        double desired = Math.Atan2(y - p.Y - p.Vy * drift, x - p.X - p.Vx * drift) / Deg;
+        double difference = Difference(desired, p.Angle);
+        int rotation = Clamp((int)Math.Round(difference), -18, 18);
+        int thrust = Math.Abs(difference) > 100 ? 0 : 200;
+        if (Math.Abs(difference) > 65 && speed > 450 && distance < 2500) thrust = 0;
+        if (boost && p.Cooldown == 0 && distance > 6000 && Math.Abs(difference) < 5) thrust = Boost;
+        return new Move(rotation, thrust);
+    }
+
+    static Move Intercept(in World state, in Pod p)
+    {
+        Pod target = Enemy == 2 ? state.C : state.D;
+        double distance = Length(target.X - p.X, target.Y - p.Y);
+        double turns = Math.Min(7, Math.Max(1, distance / 1000));
+        double x = target.X + target.Vx * turns;
+        double y = target.Y + target.Vy * turns;
+        if (distance > 5500)
+        {
+            x = CpX[target.Next];
+            y = CpY[target.Next];
+        }
+        double angle = Math.Atan2(y - p.Y - p.Vy * 2, x - p.X - p.Vx * 2) / Deg;
+        double difference = Difference(angle, p.Angle);
+        return new Move(Clamp((int)Math.Round(difference), -18, 18), Math.Abs(difference) > 95 ? 0 : 200);
+    }
+
+    static double EvaluateState(in World state)
+    {
+        double a = Progress(in state.A);
+        double b = Progress(in state.B);
+        double c = Progress(in state.C);
+        double d = Progress(in state.D);
+        double value = Math.Max(a, b) + Math.Min(a, b) * 0.12 - Math.Max(c, d) * 0.85;
+        if (Attack)
+        {
+            Pod support = Racer == 0 ? state.B : state.A;
+            Pod target = Enemy == 2 ? state.C : state.D;
+            value -= Length(support.X - target.X - target.Vx * 2, support.Y - target.Y - target.Vy * 2) * 0.09;
+        }
+        return value;
+    }
+
+    static double Progress(in Pod p)
+    {
+        double dx = CpX[p.Next] - p.X;
+        double dy = CpY[p.Next] - p.Y;
+        double distance = Math.Max(1, Length(dx, dy));
+        int passed = Math.Min(p.Passed, Prefix.Length - 1);
+        return Prefix[passed] + passed * 30000 - distance + (p.Vx * dx + p.Vy * dy) / distance * 1.8;
+    }
+
+    public static void Step(ref World state, Move a, Move b, Move c, Move d, double safeRadiusSquared = 360000)
+    {
+        Accelerate(ref state.A, a, ref state.Used);
+        Accelerate(ref state.B, b, ref state.Used);
+        Accelerate(ref state.C, c, ref state.EnemyUsed);
+        Accelerate(ref state.D, d, ref state.EnemyUsed);
+        double remaining = 1;
+        int events = 0;
+        while (remaining > 0)
+        {
+            double time = remaining;
+            int one = -1;
+            int two = -1;
+            for (int i = 3; i > 0; i--)
+            {
+                ref Pod p = ref At(ref state, i);
+                for (int j = i - 1; j >= 0; j--)
+                {
+                    ref Pod q = ref At(ref state, j);
+                    double hit = Collision(in p, in q);
+                    if (hit <= time)
+                    {
+                        time = hit;
+                        one = i;
+                        two = j;
+                    }
+                }
+            }
+            bool final = time >= remaining;
+            for (int i = 0; i < 4; i++)
+            {
+                ref Pod p = ref At(ref state, i);
+                double x = p.X + p.Vx * time;
+                double y = p.Y + p.Vy * time;
+                if (final)
+                {
+                    x = Math.Floor(x + 0.5);
+                    y = Math.Floor(y + 0.5);
+                }
+                if (p.Passed < Finish && Swept(p.X, p.Y, x, y, p.Next, i < 2 ? safeRadiusSquared : 360000))
+                {
+                    p.Passed++;
+                    if (++p.Next == Count) p.Next = 0;
+                }
+                p.X = x;
+                p.Y = y;
+            }
+            remaining -= time;
+            if (one >= 0)
+            {
+                ref Pod p = ref At(ref state, one);
+                ref Pod q = ref At(ref state, two);
+                Bounce(ref p, ref q);
+            }
+            if (++events > 256)
+            {
+                for (int i = 0; i < 4; i++)
+                {
+                    ref Pod p = ref At(ref state, i);
+                    p.X = Math.Floor(p.X + p.Vx * remaining + 0.5);
+                    p.Y = Math.Floor(p.Y + p.Vy * remaining + 0.5);
+                }
+                break;
+            }
+        }
+        for (int i = 0; i < 4; i++)
+        {
+            ref Pod p = ref At(ref state, i);
+            p.X = Math.Floor(p.X + 0.5);
+            p.Y = Math.Floor(p.Y + 0.5);
+            p.Vx = (int)(p.Vx * 0.85);
+            p.Vy = (int)(p.Vy * 0.85);
+            if (p.Cooldown > 0) p.Cooldown--;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static void Accelerate(ref Pod p, Move move, ref bool used)
+    {
+        p.Angle = Normalize(p.Angle + move.Rotation);
+        int power = move.Power;
+        if (power == Shield)
+        {
+            p.Cooldown = 4;
+            power = 0;
+        }
+        else if (power == Boost)
+        {
+            power = used ? 200 : 650;
+            used = true;
+        }
+        if (p.Cooldown > 0) return;
+        p.Vx += Cos[p.Angle] * power;
+        p.Vy += Sin[p.Angle] * power;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static bool Swept(double x, double y, double nx, double ny, int checkpoint, double radiusSquared = 360000)
+    {
+        double dx = nx - x;
+        double dy = ny - y;
+        double square = dx * dx + dy * dy;
+        double t = square > 0 ? ((CpX[checkpoint] - x) * dx + (CpY[checkpoint] - y) * dy) / square : 0;
+        t = Math.Max(0, Math.Min(1, t));
+        dx = x + dx * t - CpX[checkpoint];
+        dy = y + dy * t - CpY[checkpoint];
+        return dx * dx + dy * dy < radiusSquared;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static double Collision(in Pod a, in Pod b)
+    {
+        double x = b.X - a.X;
+        double y = b.Y - a.Y;
+        double square = x * x + y * y;
+        if (square <= 640000) return 0;
+        double vx = b.Vx - a.Vx;
+        double vy = b.Vy - a.Vy;
+        double dot = x * vx + y * vy;
+        if (dot >= 0) return 2;
+        double speed = vx * vx + vy * vy;
+        double discriminant = dot * dot - speed * (square - 640000);
+        if (discriminant < 0 || speed < 1e-12) return 2;
+        return (-dot - Math.Sqrt(discriminant)) / speed;
+    }
+
+    static void Bounce(ref Pod a, ref Pod b)
+    {
+        double x = b.X - a.X;
+        double y = b.Y - a.Y;
+        double length = Length(x, y);
+        if (length < 1e-12)
+        {
+            x = 1;
+            y = 0;
+            length = 1;
+        }
+        x /= length;
+        y /= length;
+        double one = a.Cooldown == 4 ? 0.1 : 1;
+        double two = b.Cooldown == 4 ? 0.1 : 1;
+        double force = (x * (a.Vx - b.Vx) + y * (a.Vy - b.Vy)) / (one + two);
+        force += Math.Max(120, force);
+        a.Vx -= x * force * one;
+        a.Vy -= y * force * one;
+        b.Vx += x * force * two;
+        b.Vy += y * force * two;
+        if (length <= 800)
+        {
+            double gap = (800 - length) * 0.5 + 0.00001;
+            a.X -= x * gap;
+            a.Y -= y * gap;
+            b.X += x * gap;
+            b.Y += y * gap;
+        }
+    }
+
+    static void InferOpponent(in World old)
+    {
+        for (int i = 2; i < 4; i++)
+        {
+            Pod before = i == 2 ? old.C : old.D;
+            ref Pod now = ref At(ref Current, i);
+            double ax = now.Vx / 0.85 - before.Vx;
+            double ay = now.Vy / 0.85 - before.Vy;
+            bool isolated = true;
+            for (int j = 0; j < 4; j++)
+            {
+                if (i == j) continue;
+                ref Pod other = ref At(ref Current, j);
+                if (Length(now.X - other.X, now.Y - other.Y) < 1800) isolated = false;
+            }
+            double acceleration = Length(ax, ay);
+            if (isolated && acceleration > 400) Current.EnemyUsed = true;
+            if (now.Cooldown > 0) now.Cooldown--;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static ref Pod At(ref World state, int id)
+    {
+        if (id == 0) return ref state.A;
+        if (id == 1) return ref state.B;
+        if (id == 2) return ref state.C;
+        return ref state.D;
+    }
+
+    static int BestIndex()
+    {
+        int best = 0;
+        for (int i = 1; i < Population; i++) if (Pool[i].Score > Pool[best].Score) best = i;
+        return best;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static int Random(int limit)
+    {
+        RandomState ^= RandomState << 13;
+        RandomState ^= RandomState >> 17;
+        RandomState ^= RandomState << 5;
+        return (int)(RandomState % (uint)limit);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static int Normalize(int angle)
+    {
+        if (angle < 0) angle += 360;
+        if (angle >= 360) angle -= 360;
+        return angle;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static double Difference(double target, int angle)
+    {
+        double difference = target - angle;
+        if (difference > 180) difference -= 360;
+        if (difference < -180) difference += 360;
+        return difference;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static double Length(double x, double y)
+    {
+        return Math.Sqrt(x * x + y * y);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static int Clamp(int value, int minimum, int maximum)
+    {
+        return Math.Max(minimum, Math.Min(maximum, value));
+    }
+
+    static int ReadOption(string name, int fallback)
+    {
+        int value;
+        return int.TryParse(Environment.GetEnvironmentVariable(name), out value) ? value : fallback;
+    }
+
+    class Reader
+    {
+        readonly Stream Input = Console.OpenStandardInput();
+        readonly byte[] Buffer = new byte[4096];
+        int Position;
+        int Size;
+
+        int Read()
+        {
+            if (Position >= Size)
+            {
+                Size = Input.Read(Buffer, 0, Buffer.Length);
+                Position = 0;
+                if (Size == 0) return -1;
+            }
+            return Buffer[Position++];
+        }
+
+        public int NextInt()
+        {
+            int c;
+            do c = Read(); while (c >= 0 && c <= 32);
+            if (c < 0) return int.MinValue;
+            bool negative = c == 45;
+            if (negative) c = Read();
+            int value = 0;
+            while (c >= 48 && c <= 57)
+            {
+                value = value * 10 + c - 48;
+                c = Read();
+            }
+            return negative ? -value : value;
         }
     }
 }

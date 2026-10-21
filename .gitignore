@@ -339,3 +339,8 @@ ASALocalRun/
 # BeatPulse healthcheck temp database
 healthchecksdb
 /Template.WebApi/healthchecksdb-shm
+
+# Downloader secrets, caches and state
+.env
+**/Downloader/.cache/
+**/Solutions/.download-state.json

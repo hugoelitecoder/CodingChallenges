@@ -367,3 +367,24 @@ https://www.codingame.com/contests/summer-challenge-2025-coderpad-play
 
 ---
 
+
+---
+
+### ⬇️ Downloading your own solutions
+Both downloaders keep the existing folder layout, skip files that already exist and can be rerun at any time.
+
+**LeetCode** (`LeetCode/Downloader`, needs `pip install requests browser_cookie3`):
+```
+python download-leetcode.py [--limit N] [--incremental] [--overwrite-faster] [--markdown] [--workers 3] [--interval 0.4]
+```
+- Writes `LeetCode/Solutions/<Difficulty>/<id>. <Title>/README.md` plus one code file per language.
+- The session is read from `LEETCODE_SESSION` (and optionally `LEETCODE_CSRFTOKEN`) in the environment or a local `.env` file, otherwise from an installed browser.
+- `--limit N` downloads at most N solutions and stops listing early; `--incremental` stops at the newest submission seen by the last complete run; `--overwrite-faster` replaces a saved solution when a newer accepted one has a lower runtime.
+
+**CodinGame** (`CodinGame/Downloader`, needs `pip install codingame browser_cookie3`):
+```
+python download-codingame.py [--limit N] [--workers 3] [--interval 0.3]
+```
+- Writes `CodinGame/Solutions/<Level>/<Title>.<ext>`; the `rememberMe` cookie is read from `CODINGAME_REMEMBER_ME` or `.env`, otherwise from an installed browser.
+
+`.env` files, caches and download state are git-ignored; never commit cookies.

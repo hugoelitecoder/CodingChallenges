@@ -1,12 +1,18 @@
-﻿import os
+"""Download CodinGame puzzle solutions into Solutions/<Level>/<Title>.<ext>.
+
+The rememberMe cookie is read from the CODINGAME_REMEMBER_ME environment
+variable or a local .env file, and otherwise detected from an installed browser.
+"""
+import argparse
+import os
 import re
 import sys
+import threading
 import time
-import browser_cookie3
-import codingame
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from requests.exceptions import HTTPError
 
-# --- Constants and Configuration ---
 EXTENSIONS = {
     'bash': 'sh', 'c': 'c', 'c#': 'cs', 'c++': 'cpp', 'clojure': 'clj', 'd': 'd', 'dart': 'dart',
     'f#': 'fs', 'go': 'go', 'groovy': 'groovy', 'haskell': 'hs', 'java': 'java', 'javascript': 'js',
@@ -14,9 +20,10 @@ EXTENSIONS = {
     'php': 'php', 'python3': 'py', 'ruby': 'rb', 'rust': 'rs', 'scala': 'scala', 'swift': 'swift',
     'typescript': 'ts', 'vb.net': 'vb',
 }
-BASE_FOLDER = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Solutions"))
-# Configuration for individual request retries
-RETRY_CONFIG = { "max_retries": 3, "backoff_factor": 1.5 }
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_OUT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "Solutions"))
+TITLE_BATCH = 100
+
 
 def clean_name(name):
     name = re.sub(r'[\\/*?:"<>|]', "", name)
@@ -25,150 +32,205 @@ def clean_name(name):
         name = name[0].upper() + name[1:]
     return name
 
-def get_remember_me_cookie():
+
+def load_dotenv(paths):
+    """Read KEY=VALUE lines; variables already set in the environment win."""
+    for path in paths:
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, val = line.split("=", 1)
+                    key = key.strip()
+                    if key.startswith("export "):
+                        key = key[len("export "):].strip()
+                    os.environ.setdefault(key, val.strip().strip('"').strip("'"))
+
+
+def get_remember_me_cookie(use_browser=False):
+    load_dotenv([os.path.join(os.getcwd(), ".env"), os.path.join(SCRIPT_DIR, ".env")])
+    if not use_browser and os.environ.get("CODINGAME_REMEMBER_ME"):
+        return os.environ["CODINGAME_REMEMBER_ME"]
     print("Trying to detect CodinGame cookie automatically...")
     print("NOTE: For best results, completely close your browser before running.")
-    browsers_to_try = [
-        ('Brave', browser_cookie3.brave), ('Chrome', browser_cookie3.chrome),
-        ('Edge', browser_cookie3.edge), ('Firefox', browser_cookie3.firefox),
-        ('Safari', browser_cookie3.safari), ('Opera', browser_cookie3.opera),
-        ('Vivaldi', browser_cookie3.vivaldi)
-    ]
-    for name, browser_func in browsers_to_try:
+    try:
+        import browser_cookie3
+    except ImportError:
+        browser_cookie3 = None
+        print("   - browser_cookie3 is not installed (pip install browser_cookie3)")
+    for name in ['Brave', 'Chrome', 'Edge', 'Firefox', 'Safari', 'Opera', 'Vivaldi'] if browser_cookie3 else []:
         try:
             print(f"   - Checking {name}...", end='')
-            cj = browser_func(domain_name='codingame.com')
-            for cookie in cj:
+            for cookie in getattr(browser_cookie3, name.lower())(domain_name='codingame.com'):
                 if cookie.name == 'rememberMe':
-                    print(" ✅ Found!")
-                    print(f"Successfully found rememberMe cookie in {name}.")
+                    print(" found")
                     return cookie.value
             print(" (not found)")
         except Exception:
             print(" (failed to read)")
-    print("\n❌ Could not detect your CodinGame login automatically.")
+    print("\nCould not detect your CodinGame login automatically.")
     print("Paste the 'value' of the rememberMe cookie here and press Enter:")
     return input().strip()
 
-def resilient_request(client, service, method, args):
-    retries=RETRY_CONFIG["max_retries"]
-    backoff=RETRY_CONFIG["backoff_factor"]
-    last_exception = None
-    for attempt in range(retries):
-        try:
-            # Add a small, consistent delay to be respectful to the API
-            time.sleep(0.5)
-            return client.request(service, method, args)
-        except HTTPError as e:
-            # Handle non-retriable errors immediately
-            if e.response.status_code == 422: # Unprocessable Entity
-                raise e # This is a permanent error for this puzzle, so don't retry
-            last_exception = e
-        except Exception as e:
-            last_exception = e
 
-        if attempt < retries - 1:
-            delay = backoff * (2 ** attempt)
-            print(f"\n   -> ⚠️ Request for '{method}' failed. Retrying in {delay:.1f}s...", flush=True)
-            time.sleep(delay)
-            
-    raise last_exception
+class RateLimiter:
+    """Enforces a minimum interval between request starts across threads."""
 
-def process_puzzle(puzzle_progress, client, user_id, current_index, total_puzzles):
-    """
-    Processes a single puzzle sequentially.
-    Returns a tuple of (saved_count, skipped_count, error_count) for this puzzle.
-    """
-    puzzle_id = puzzle_progress.get("id")
-    level_name = puzzle_progress.get("level", "Unknown")
-    folder_path = os.path.join(BASE_FOLDER, level_name.capitalize())
-    progress_str = f"[{current_index + 1:4d}/{total_puzzles}]"
+    def __init__(self, interval):
+        self.interval, self.lock, self.next_at = interval, threading.Lock(), 0.0
 
-    # Fetch puzzle title
-    full_progress = resilient_request(client, 'Puzzle', 'findProgressByIds', [[puzzle_id], user_id, 2])
-    if not full_progress or not isinstance(full_progress, list) or not full_progress[0]:
-        raise ValueError(f"Could not fetch title for puzzle ID {puzzle_id}.")
-    title = full_progress[0].get("title", "unknown").strip()
-    cleaned_title = clean_name(title)
+    def wait(self):
+        with self.lock:
+            now = time.monotonic()
+            start = max(now, self.next_at)
+            self.next_at = start + self.interval
+        if start > now:
+            time.sleep(start - now)
 
-    # Fetch solutions
-    solutions = resilient_request(client, "Solution", "findMySolutions", [user_id, puzzle_id, None])
-    if not solutions:
-        print(f"{progress_str} ⏩ Skipped: (No solutions for '{cleaned_title}')")
-        return 0, 0, 0
+    def pause(self, seconds):
+        with self.lock:
+            self.next_at = max(self.next_at, time.monotonic() + seconds)
 
-    latest_by_lang = {}
+
+class Api:
+    def __init__(self, client, interval=0.3, max_retries=5, backoff=2.0, max_backoff=120.0):
+        self.client, self.limiter = client, RateLimiter(interval)
+        self.max_retries, self.backoff, self.max_backoff = max_retries, backoff, max_backoff
+        self.requests_made = 0
+
+    def request(self, service, method, args):
+        last_err = None
+        for attempt in range(self.max_retries):
+            self.limiter.wait()
+            self.requests_made += 1
+            wait = min(self.backoff * 2 ** attempt, self.max_backoff)
+            try:
+                return self.client.request(service, method, args)
+            except HTTPError as e:
+                status = e.response.status_code if e.response is not None else None
+                if status == 422:
+                    raise  # permanent error for this puzzle
+                retry_after = e.response.headers.get("Retry-After") if e.response is not None else None
+                if status in (429, 403) and retry_after and str(retry_after).strip().isdigit():
+                    wait = float(retry_after)
+                last_err = e
+            except Exception as e:
+                last_err = e
+            print(f"   -> Request '{method}' failed ({last_err.__class__.__name__}), retrying in {wait:.0f}s", flush=True)
+            self.limiter.pause(wait)
+        raise last_err
+
+
+def fetch_titles(api, user_id, puzzle_ids):
+    """Fetch puzzle titles in batches instead of one request per puzzle."""
+    titles = {}
+    for i in range(0, len(puzzle_ids), TITLE_BATCH):
+        chunk = puzzle_ids[i:i + TITLE_BATCH]
+        for item in api.request('Puzzle', 'findProgressByIds', [chunk, user_id, 2]) or []:
+            if item and item.get("id") is not None:
+                titles[item["id"]] = (item.get("title") or "unknown").strip()
+    return titles
+
+
+def latest_by_language(solutions):
+    latest = {}
     for s in solutions:
-        lang = s.get('programmingLanguageId', 'txt').lower()
-        if lang not in latest_by_lang or s['creationTime'] > latest_by_lang[lang]['creationTime']:
-            latest_by_lang[lang] = s
-    
-    saved_in_puzzle, skipped_in_puzzle = 0, 0
-    for lang, sol in latest_by_lang.items():
-        ext = EXTENSIONS.get(lang, 'txt')
-        filepath = os.path.join(folder_path, f"{cleaned_title}.{ext}")
-        
-        if os.path.exists(filepath):
-            skipped_in_puzzle += 1
+        lang = (s.get('programmingLanguageId') or 'txt').lower()
+        if lang not in latest or (s.get('creationTime') or 0) > (latest[lang].get('creationTime') or 0):
+            latest[lang] = s
+    return latest
+
+
+def process_puzzle(api, user_id, base, puzzle, title, label):
+    """Download missing solutions for one puzzle. Returns (saved, skipped)."""
+    folder = os.path.join(base, (puzzle.get("level") or "Unknown").capitalize())
+    cleaned = clean_name(title)
+    solutions = api.request("Solution", "findMySolutions", [user_id, puzzle["id"], None])
+    if not solutions:
+        return 0, 0
+    saved = skipped = 0
+    for lang, sol in latest_by_language(solutions).items():
+        path = os.path.join(folder, f"{cleaned}.{EXTENSIONS.get(lang, 'txt')}")
+        if os.path.exists(path):
+            skipped += 1
             continue
-
-        os.makedirs(folder_path, exist_ok=True)
-        solution_details = resilient_request(client, "Solution", "findSolution", [user_id, sol["testSessionQuestionSubmissionId"]])
-        code = solution_details.get("code", "")
-        with open(filepath, "w", encoding="utf-8") as f: f.write(code)
-        
+        details = api.request("Solution", "findSolution", [user_id, sol["testSessionQuestionSubmissionId"]])
+        os.makedirs(folder, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write((details or {}).get("code", ""))
         mtime = sol.get("creationTime")
-        if mtime: os.utime(filepath, (mtime // 1000, mtime // 1000))
-        
-        print(f"{progress_str} ✅ Saved:   {os.path.relpath(filepath, BASE_FOLDER)}")
-        saved_in_puzzle += 1
-    
-    if skipped_in_puzzle > 0:
-         print(f"{progress_str} ⏩ Skipped: {skipped_in_puzzle} file(s) for '{cleaned_title}' (already exist)")
+        if mtime:
+            os.utime(path, (mtime // 1000, mtime // 1000))
+        print(f"{label} Saved:   {os.path.relpath(path, base)}")
+        saved += 1
+    return saved, skipped
 
-    return saved_in_puzzle, skipped_in_puzzle, 0
 
-def main():
-    os.makedirs(BASE_FOLDER, exist_ok=True)
-    remember_me = get_remember_me_cookie()
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--out", default=DEFAULT_OUT, help="output folder (default: ../Solutions)")
+    ap.add_argument("--limit", type=int, help="process at most N puzzles")
+    ap.add_argument("--workers", type=int, default=3, help="concurrent puzzles (default: 3)")
+    ap.add_argument("--interval", type=float, default=0.3,
+                    help="minimum seconds between requests across all workers (default: 0.3)")
+    ap.add_argument("--browser", action="store_true", help="ignore CODINGAME_REMEMBER_ME and read browser cookies")
+    ap.add_argument("--no-pause", action="store_true", help="do not wait for Enter before exiting")
+    a = ap.parse_args(argv)
+
+    import codingame
+    base = os.path.abspath(a.out)
+    os.makedirs(base, exist_ok=True)
+    remember_me = get_remember_me_cookie(a.browser)
     try:
         client = codingame.Client()
         print("Logging in...")
         client.login(remember_me_cookie=remember_me)
-        if not client.logged_in or not client.codingamer: raise ConnectionRefusedError("Login failed")
+        if not client.logged_in or not client.codingamer:
+            raise ConnectionRefusedError("Login failed")
         user_id = client.codingamer.id
-        print(f"✅ Successfully logged in as: {client.codingamer.pseudo} (ID: {user_id})")
-        
-        print("Fetching all puzzle progress...")
-        all_puzzles = resilient_request(client, "Puzzle", "findAllMinimalProgress", [user_id])
-        total_puzzles = len(all_puzzles)
-        print(f"Found {total_puzzles} puzzles in your history.")
+        print(f"Logged in as: {client.codingamer.pseudo}")
+        api = Api(client, interval=a.interval)
+        puzzles = api.request("Puzzle", "findAllMinimalProgress", [user_id]) or []
+        if a.limit:
+            puzzles = puzzles[:a.limit]
+        titles = fetch_titles(api, user_id, [p["id"] for p in puzzles])
     except Exception as e:
-        print(f"❌ Critical error during setup: {e}"); return
+        print(f"Critical error during setup: {e}")
+        return 1
+    total = len(puzzles)
+    print(f"Processing {total} puzzles.")
 
-    saved_count, skipped_count, error_count = 0, 0, 0
+    start = time.monotonic()
+    saved = skipped = errors = 0
+    with ThreadPoolExecutor(max_workers=max(1, a.workers)) as pool:
+        futures = {}
+        for i, p in enumerate(puzzles):
+            label = f"[{i + 1:4d}/{total}]"
+            if p["id"] not in titles:
+                errors += 1
+                print(f"{label} Error: no title for puzzle ID {p['id']}")
+                continue
+            futures[pool.submit(process_puzzle, api, user_id, base, p, titles[p["id"]], label)] = (label, p)
+        for fut in as_completed(futures):
+            label, p = futures[fut]
+            try:
+                s, k = fut.result()
+                saved, skipped = saved + s, skipped + k
+            except Exception as e:
+                errors += 1
+                print(f"{label} Error processing '{p.get('prettyId', p.get('id'))}': {e}")
 
-    print(f"\n--- Starting Sequential Processing ---")
-    for i, puzzle_progress in enumerate(all_puzzles):
-        try:
-            s, k, e = process_puzzle(puzzle_progress, client, user_id, i, total_puzzles)
-            saved_count += s
-            skipped_count += k
-            error_count += e
-        except Exception as e:
-            error_count += 1
-            progress_str = f"[{i + 1:4d}/{total_puzzles}]"
-            title_for_error = puzzle_progress.get('prettyId', f"ID {puzzle_progress.get('id', 'Unknown')}")
-            print(f"{progress_str} ❌ Error processing '{title_for_error}': {e}")
-            
-    print("\n🎉 All done!")
-    print(f"--- Summary ---")
-    print(f"   - Solutions Saved:   {saved_count}")
-    print(f"   - Solutions Skipped (already existed): {skipped_count}")
-    if error_count > 0:
-        print(f"   - Puzzles with Errors: {error_count}")
-        
-    input("\nPress Enter to exit.")
+    print(f"\nDone in {time.monotonic() - start:.1f}s ({api.requests_made} requests).")
+    print(f"   - Solutions saved:   {saved}")
+    print(f"   - Solutions skipped (already existed): {skipped}")
+    if errors:
+        print(f"   - Puzzles with errors: {errors}")
+    if not a.no_pause and sys.stdin.isatty():
+        input("\nPress Enter to exit.")
+    return 0 if not errors else 2
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
